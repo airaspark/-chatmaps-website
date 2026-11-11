@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Vendor } from '../types';
 import { vendorService } from '../services/vendorService';
@@ -7,6 +7,7 @@ import { useAuth } from '../context/AuthContext';
 import { useApp } from '../context/AppContext';
 import { CRAVING_CATEGORIES, getVendorCoverImage } from '../data/foodImages';
 import { PWAInstallButton } from '../components/common/PWAInstallButton';
+import { MANUAL_CITY_OPTIONS, normalizeCityName } from '../data/cities';
 import {
   Search,
   MapPin,
@@ -21,14 +22,26 @@ import {
   ArrowRight
 } from 'lucide-react';
 
+const locationServiceDistanceKm = (lat1: number, lng1: number, lat2: number, lng2: number): number => {
+  const toRadians = (degrees: number) => degrees * Math.PI / 180;
+  const dLat = toRadians(lat2 - lat1);
+  const dLng = toRadians(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+};
+
 export const Home: React.FC = () => {
   const navigate = useNavigate();
   const { userProfile } = useAuth();
-  const { selectedCity, t } = useApp();
+  const {
+    selectedCity, setSelectedCity, selectedState, selectedLocality, locationSource, locationError,
+    customerCoordinates, isDetectingLocation, detectCurrentLocation, clearSelectedCity, t
+  } = useApp();
 
   const [vendors, setVendors] = useState<Vendor[]>([]);
+  const [vendorsLoading, setVendorsLoading] = useState(true);
+  const [vendorLoadError, setVendorLoadError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedDesktopCity, setSelectedDesktopCity] = useState('All');
 
   // Quick filter states matching screenshot
   const [filterOpenNow, setFilterOpenNow] = useState(false);
@@ -36,19 +49,81 @@ export const Home: React.FC = () => {
   const [filterNearest, setFilterNearest] = useState(false);
 
   // Selected craving: default to 'Pani Puri' to match the screenshot
-  const [selectedCraving, setSelectedCraving] = useState<string>('Pani Puri');
+  const [selectedCraving, setSelectedCraving] = useState<string>('');
 
   // Favorites tracking
-  const [userFavorites, setUserFavorites] = useState<string[]>(['vendor-1']);
+  const [userFavorites, setUserFavorites] = useState<string[]>([]);
 
   // Scroll indicator state for Cravings carousel
   const scrollRef = useRef<HTMLDivElement>(null);
   const [scrollProgress, setScrollProgress] = useState(0);
+  const [activePromoSlide, setActivePromoSlide] = useState(0);
+  const [promoPaused, setPromoPaused] = useState(false);
+  const promoPointerStart = useRef<number | null>(null);
+  const suppressPromoClick = useRef(false);
+  const resumePromoTimer = useRef<number | null>(null);
+  const autoDetectAttempted = useRef(false);
+
+  const cityName = selectedCity.trim();
+  const cityLabel = [selectedLocality, cityName, selectedState].filter(Boolean).join(', ');
+  const promoSlides = useMemo(() => [
+    {
+      eyebrow: cityName ? `EXPLORE ${cityName.toUpperCase()}` : 'YOUR NEIGHBORHOOD',
+      title: cityName ? `Taste ${cityName}` : 'Taste street food',
+      message: cityName ? `Explore street food around ${cityName}.` : 'Choose your city to see local stalls.',
+      image: '/images/foods/explore-banner.jpg',
+      alt: 'Indian street food platter'
+    },
+    {
+      eyebrow: 'REAL VENDOR LOCATIONS',
+      title: cityName ? `Find food in ${cityName}` : 'Find street food near you',
+      message: 'Browse real stalls that are approved and online now.',
+      image: '/images/foods/pani-puri.jpg',
+      alt: 'Pani puri street food'
+    },
+    {
+      eyebrow: 'FIND YOUR CRAVING',
+      title: cityName ? `Explore ${cityName}` : 'Explore street food',
+      message: 'Search dishes and see current vendor availability.',
+      image: '/images/foods/momos.jpg',
+      alt: 'Steamed street food momos'
+    }
+  ], [cityName]);
+
+  useEffect(() => {
+    if (autoDetectAttempted.current || cityName || locationSource === 'manual') return;
+    autoDetectAttempted.current = true;
+    try {
+      if (sessionStorage.getItem('chatmaps_auto_location_denied') === '1') return;
+    } catch {}
+    void detectCurrentLocation().then(success => {
+      try {
+        if (success) sessionStorage.removeItem('chatmaps_auto_location_denied');
+        else sessionStorage.setItem('chatmaps_auto_location_denied', '1');
+      } catch {}
+    });
+  }, [cityName, locationSource, detectCurrentLocation]);
+
+  useEffect(() => {
+    if (promoPaused || promoSlides.length < 2) return;
+    const timer = window.setInterval(() => setActivePromoSlide(index => (index + 1) % promoSlides.length), 5500);
+    return () => window.clearInterval(timer);
+  }, [promoPaused, promoSlides.length]);
+
+  useEffect(() => () => {
+    if (resumePromoTimer.current !== null) window.clearTimeout(resumePromoTimer.current);
+  }, []);
 
   // Real-time Firestore approved vendors subscription
   useEffect(() => {
     const unsubscribe = vendorService.subscribeToApprovedVendors((list) => {
       setVendors(list);
+      setVendorsLoading(false);
+      setVendorLoadError(null);
+    }, error => {
+      setVendors([]);
+      setVendorsLoading(false);
+      setVendorLoadError(error.message || 'Vendor listings are unavailable.');
     });
     return () => unsubscribe();
   }, []);
@@ -69,17 +144,28 @@ export const Home: React.FC = () => {
       const maxScroll = scrollWidth - clientWidth;
       if (maxScroll > 0) {
         setScrollProgress((scrollLeft / maxScroll) * 100);
-      }
+      } else setScrollProgress(0);
     }
+  };
+
+  const pausePromo = () => {
+    setPromoPaused(true);
+    if (resumePromoTimer.current !== null) window.clearTimeout(resumePromoTimer.current);
+    resumePromoTimer.current = window.setTimeout(() => setPromoPaused(false), 8000);
+  };
+
+  const movePromo = (direction: 1 | -1) => {
+    pausePromo();
+    setActivePromoSlide(index => (index + direction + promoSlides.length) % promoSlides.length);
   };
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (searchQuery.trim()) {
-      navigate(`/explore?q=${encodeURIComponent(searchQuery.trim())}`);
-    } else {
-      navigate('/explore');
-    }
+    const params = new URLSearchParams();
+    if (searchQuery.trim()) params.set('q', searchQuery.trim());
+    if (cityName) params.set('city', cityName);
+    const query = params.toString();
+    navigate(`/explore${query ? `?${query}` : ''}`);
   };
 
   const handleToggleFavorite = async (vendorId: string, e: React.MouseEvent) => {
@@ -101,29 +187,44 @@ export const Home: React.FC = () => {
     }
   };
 
-  // Filter vendors based on quick filters and selected craving
-  const filteredVendors = vendors.filter((v) => {
+  // Filter only real, currently-online vendors in the selected city.
+  const distanceKm = (vendor: Vendor): number | null => {
+    if (!customerCoordinates || !vendor.location || !Number.isFinite(vendor.location.lat) || !Number.isFinite(vendor.location.lng)) return null;
+    return locationServiceDistanceKm(customerCoordinates.lat, customerCoordinates.lng, vendor.location.lat, vendor.location.lng);
+  };
+
+  const cityVendors = vendors.filter(vendor => {
+    if (!cityName) return false;
+    const sameCity = normalizeCityName(vendor.city || '') === normalizeCityName(cityName);
+    const actualDistance = distanceKm(vendor);
+    return sameCity || (locationSource === 'gps' && actualDistance !== null && actualDistance <= 30);
+  });
+
+  const filteredVendors = cityVendors.filter((v) => {
     if (filterOpenNow && !v.isOpen) return false;
-    if (selectedCraving) {
-      const query = selectedCraving.toLowerCase();
-      const matchName = v.shopName.toLowerCase().includes(query);
-      const matchCat = v.category.toLowerCase().includes(query);
-      const matchDesc = v.description.toLowerCase().includes(query);
-      const matchMenu = v.menu && v.menu.some(m => m.name.toLowerCase().includes(query));
-      const matchSub = v.subCategories && v.subCategories.some(s => s.toLowerCase().includes(query));
-      if (!matchName && !matchCat && !matchDesc && !matchMenu && !matchSub) {
-        // If not a strict text match, still show nearby stalls unless filter was explicitly changed
-        if (selectedCraving !== 'Pani Puri' && selectedCraving !== 'Chats') return false;
-      }
+    if (filterWithin2Km) {
+      const distance = distanceKm(v);
+      if (distance === null || distance > 2) return false;
     }
     return true;
   });
 
-  const displayVendors = filteredVendors.length > 0 ? filteredVendors : vendors;
-  const topRatedVendors = [...vendors].sort((a, b) => b.rating - a.rating).slice(0, 4);
+  const displayVendors = [...filteredVendors].sort((a, b) => {
+    if (!filterNearest || !customerCoordinates) return 0;
+    return (distanceKm(a) ?? Number.POSITIVE_INFINITY) - (distanceKm(b) ?? Number.POSITIVE_INFINITY);
+  });
+  const topRatedVendors = [...cityVendors].sort((a, b) => b.rating - a.rating).slice(0, 4);
+
+  const openExplore = () => {
+    const params = new URLSearchParams();
+    if (cityName) params.set('city', cityName);
+    const query = params.toString();
+    navigate(`/explore${query ? `?${query}` : ''}`);
+  };
 
   return (
     <div className="flex-1 flex flex-col bg-stone-50 dark:bg-stone-950 transition-colors">
+      {vendorLoadError && <div role="alert" className="max-w-7xl mx-auto w-full px-4 pt-3 text-xs text-rose-700">{vendorLoadError}</div>}
       {/* ========================================================
           MOBILE & TABLET VIEW: Strict Pixel-Fidelity to Screenshot
           ======================================================== */}
@@ -162,7 +263,10 @@ export const Home: React.FC = () => {
           {/* Within 2 km Pill */}
           <button
             type="button"
-            onClick={() => setFilterWithin2Km(!filterWithin2Km)}
+            onClick={() => {
+              if (!customerCoordinates) { setFilterWithin2Km(true); void detectCurrentLocation(); }
+              else setFilterWithin2Km(!filterWithin2Km);
+            }}
             className={`flex items-center gap-1.5 px-3.5 py-2 rounded-full border text-xs font-bold shrink-0 transition shadow-xs ${
               filterWithin2Km
                 ? 'bg-orange-50 dark:bg-orange-950/60 border-orange-500 text-orange-700 dark:text-orange-300 ring-1 ring-orange-500'
@@ -176,7 +280,10 @@ export const Home: React.FC = () => {
           {/* Nearest Pill */}
           <button
             type="button"
-            onClick={() => setFilterNearest(!filterNearest)}
+            onClick={() => {
+              if (!customerCoordinates) { setFilterNearest(true); void detectCurrentLocation(); }
+              else setFilterNearest(!filterNearest);
+            }}
             className={`flex items-center gap-1.5 px-3.5 py-2 rounded-full border text-xs font-bold shrink-0 transition shadow-xs ${
               filterNearest
                 ? 'bg-blue-50 dark:bg-blue-950/60 border-blue-500 text-blue-700 dark:text-blue-300 ring-1 ring-blue-500'
@@ -188,42 +295,56 @@ export const Home: React.FC = () => {
           </button>
         </div>
 
-        {/* 3. EXPLORE MYSURU PROMOTIONAL BANNER */}
+        {/* 3. CITY-AWARE PROMOTIONAL CAROUSEL */}
         <div>
           <div
-            onClick={() => navigate('/explore?city=Mysuru')}
-            className="cursor-pointer bg-gradient-to-r from-[#ff5e00] via-[#ff5e00] to-[#e64c00] rounded-3xl p-5 sm:p-6 text-white shadow-xl shadow-orange-500/20 relative overflow-hidden flex items-center justify-between min-h-[175px] active:scale-[0.99] transition-transform"
+            role="button"
+            tabIndex={0}
+            aria-label={`${promoSlides[activePromoSlide].title}. Open local food results.`}
+            onClick={() => {
+              if (suppressPromoClick.current) { suppressPromoClick.current = false; return; }
+              openExplore();
+            }}
+            onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') openExplore(); }}
+            onMouseEnter={() => setPromoPaused(true)}
+            onMouseLeave={() => setPromoPaused(false)}
+            onPointerDown={event => { promoPointerStart.current = event.clientX; setPromoPaused(true); }}
+            onPointerUp={event => {
+              if (promoPointerStart.current === null) return;
+              const delta = event.clientX - promoPointerStart.current;
+              promoPointerStart.current = null;
+              if (Math.abs(delta) > 45) {
+                suppressPromoClick.current = true;
+                movePromo(delta < 0 ? 1 : -1);
+              } else {
+                pausePromo();
+              }
+            }}
+            onPointerCancel={() => { promoPointerStart.current = null; setPromoPaused(false); }}
+            className="cursor-pointer bg-gradient-to-r from-[#ff5e00] via-[#ff5e00] to-[#e64c00] rounded-3xl text-white shadow-xl shadow-orange-500/20 relative overflow-hidden min-h-[175px] active:scale-[0.99] transition-transform touch-pan-y"
           >
-            {/* Left Content */}
-            <div className="z-10 max-w-[55%] space-y-2">
-              <span className="inline-block px-3 py-1 rounded-full bg-white/20 backdrop-blur-xs text-[10px] sm:text-xs font-black tracking-wider uppercase text-white">
-                EXPLORE MYSURU
-              </span>
-              <h2 className="text-3xl sm:text-4xl font-black tracking-tight leading-[1.05]">
-                Taste<br />Mysuru
-              </h2>
-              <p className="text-xs text-orange-100 font-medium leading-snug pt-0.5">
-                Explore street foods around your location.
-              </p>
-            </div>
-
-            {/* Right Food Dish Image: Realistic High-Resolution Masala Puri Platter */}
-            <div className="w-36 h-36 sm:w-44 sm:h-44 rounded-full overflow-hidden shrink-0 border-4 border-white/25 shadow-2xl bg-stone-900 relative">
-              <img
-                src="/images/foods/explore-banner.jpg"
-                alt="Taste Mysuru Street Food"
-                className="w-full h-full object-cover scale-105"
-                loading="eager"
-              />
+            <div className="flex w-[300%] transition-transform duration-500 ease-out" style={{ transform: `translateX(-${activePromoSlide * 33.3333}%)` }}>
+              {promoSlides.map(slide => (
+                <div key={slide.eyebrow} className="flex w-1/3 shrink-0 items-center justify-between gap-3 p-5 sm:p-6 min-h-[175px]">
+                  <div className="z-10 max-w-[58%] space-y-2">
+                    <span className="inline-block px-3 py-1 rounded-full bg-white/20 backdrop-blur-xs text-[10px] sm:text-xs font-black tracking-wider uppercase text-white">{slide.eyebrow}</span>
+                    <h2 className="text-2xl sm:text-4xl font-black tracking-tight leading-[1.05]">{slide.title}</h2>
+                    <p className="text-xs text-orange-100 font-medium leading-snug pt-0.5">{slide.message}</p>
+                  </div>
+                  <div className="w-28 h-28 sm:w-44 sm:h-44 rounded-full overflow-hidden shrink-0 border-4 border-white/25 shadow-2xl bg-stone-900 relative">
+                    <img src={slide.image} alt={slide.alt} className="w-full h-full object-cover scale-105" loading={activePromoSlide === 0 ? 'eager' : 'lazy'} draggable={false} />
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
 
           {/* Carousel Indicator Dots */}
-          <div className="flex items-center justify-center gap-1.5 mt-2.5">
-            <span className="w-6 h-1.5 rounded-full bg-orange-600 transition-all duration-300" />
-            <span className="w-1.5 h-1.5 rounded-full bg-stone-300 dark:bg-stone-700" />
-            <span className="w-1.5 h-1.5 rounded-full bg-stone-300 dark:bg-stone-700" />
+          <div className="flex items-center justify-center gap-1.5 mt-2.5" aria-label="Promotional slides">
+            {promoSlides.map((slide, index) => <button key={slide.eyebrow} type="button" aria-label={`Show promotion ${index + 1}`} aria-current={activePromoSlide === index} onClick={() => { pausePromo(); setActivePromoSlide(index); }} className={`h-1.5 rounded-full transition-all duration-300 ${activePromoSlide === index ? 'w-6 bg-orange-600' : 'w-1.5 bg-stone-300 dark:bg-stone-700'}`} />)}
           </div>
+          {locationSource === 'gps' && <p className="mt-1 text-center text-[10px] text-stone-500">City data by Google Maps</p>}
+          {locationError && <p role="status" className="mt-2 text-[11px] text-rose-700 dark:text-rose-300">{locationError} <button className="underline font-bold" disabled={isDetectingLocation} onClick={() => void detectCurrentLocation()}>{isDetectingLocation ? 'Detecting…' : 'Try again'}</button></p>}
         </div>
 
         {/* 4. CRAVINGS SECTION (PORTRAIT CARDS WITH REALISTIC FOOD PHOTOGRAPHS) */}
@@ -244,7 +365,7 @@ export const Home: React.FC = () => {
           <div
             ref={scrollRef}
             onScroll={handleCravingsScroll}
-            className="flex items-start gap-3.5 overflow-x-auto pb-2 no-scrollbar scroll-smooth"
+            className="flex items-start gap-3.5 overflow-x-auto overscroll-x-contain pb-2 no-scrollbar scroll-smooth"
           >
             {CRAVING_CATEGORIES.map((item) => {
               const isSelected = selectedCraving === item.name;
@@ -253,7 +374,12 @@ export const Home: React.FC = () => {
                 <button
                   key={item.id}
                   type="button"
-                  onClick={() => setSelectedCraving(isSelected ? '' : item.name)}
+                  onClick={() => {
+                    setSelectedCraving(item.name);
+                    const params = new URLSearchParams({ category: item.categoryKey });
+                    if (cityName) params.set('city', cityName);
+                    navigate(`/explore?${params.toString()}`);
+                  }}
                   className="flex flex-col items-center gap-2 shrink-0 group active:scale-95 transition text-left"
                 >
                   {/* Portrait Card Container */}
@@ -288,12 +414,12 @@ export const Home: React.FC = () => {
           </div>
 
           {/* Orange Scroll Progress Bar beneath Cravings (matching screenshot) */}
-          <div className="w-full max-w-[180px] h-1.5 bg-stone-200 dark:bg-stone-800 rounded-full overflow-hidden mt-1">
+          <div className="relative w-full max-w-[180px] h-1.5 bg-stone-200 dark:bg-stone-800 rounded-full overflow-hidden mt-1" aria-hidden="true">
             <div
               className="h-full bg-orange-600 rounded-full transition-all duration-150"
               style={{
-                width: '45%',
-                transform: `translateX(${scrollProgress * 1.2}%)`
+                width: '28%',
+                transform: `translateX(${scrollProgress * 2.57}%)`
               }}
             />
           </div>
@@ -303,10 +429,10 @@ export const Home: React.FC = () => {
         <div className="space-y-3 pt-2">
           <div className="flex items-center justify-between">
             <h3 className="font-black text-sm text-stone-900 dark:text-stone-100 tracking-wider uppercase">
-              NEARBY STALLS
+              {cityName ? `NEARBY STALLS IN ${cityName.toUpperCase()}` : 'NEARBY STALLS'}
             </h3>
             <Link
-              to="/explore"
+              to={cityName ? `/explore?city=${encodeURIComponent(cityName)}` : '/explore'}
               className="text-xs font-bold text-orange-600 hover:text-orange-700 transition"
             >
               See All
@@ -314,9 +440,9 @@ export const Home: React.FC = () => {
           </div>
 
           {/* Cards Grid: 2 columns on phones, 3 columns on tablets */}
-          <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 gap-3 md:gap-4">
-            {displayVendors.map((vendor, idx) => {
-              const isFav = userFavorites.includes(vendor.id) || idx === 0;
+          {vendorsLoading ? <p role="status" className="col-span-full rounded-2xl bg-white dark:bg-stone-900 p-6 text-center text-xs text-stone-500">Loading online stalls…</p> : displayVendors.length > 0 ? <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 gap-3 md:gap-4">
+            {displayVendors.map((vendor) => {
+              const isFav = userFavorites.includes(vendor.id);
               const coverPhoto = getVendorCoverImage(vendor);
 
               return (
@@ -365,12 +491,18 @@ export const Home: React.FC = () => {
                         }`}
                       />
                       <span>{vendor.isOpen ? 'Open Now' : 'Closed'}</span>
+                      {filterNearest && distanceKm(vendor) !== null && <span className="ml-auto text-stone-500">{distanceKm(vendor)!.toFixed(1)} km</span>}
                     </div>
                   </div>
                 </div>
               );
             })}
-          </div>
+          </div> : <div className="rounded-2xl border border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900 p-6 text-center">
+            <MapPin className="mx-auto mb-2 h-6 w-6 text-orange-500" />
+            <p className="text-sm font-bold text-stone-800 dark:text-stone-100">{cityName ? `No online stalls found in ${cityName}` : 'Choose a city to find local stalls'}</p>
+            <p className="mt-1 text-xs text-stone-500">{cityName ? 'Only approved vendors with a fresh live location appear here.' : 'Allow device location or select a city manually from the header.'}</p>
+            {locationError && <p className="mt-2 text-xs text-rose-600">{locationError}</p>}
+          </div>}
         </div>
       </div>
 
@@ -393,15 +525,39 @@ export const Home: React.FC = () => {
 
             {/* Main Headline */}
             <h1 className="text-4xl sm:text-5xl md:text-6xl font-black tracking-tight leading-tight mb-6">
-              Taste the Real India. <br />
+              {cityName ? `Taste ${cityName}.` : 'Taste the Real India.'} <br />
               <span className="text-amber-200 underline decoration-amber-400 decoration-wavy decoration-2">
-                Every Corner. Every Stall.
+                {cityLabel || 'Every Corner. Every Stall.'}
               </span>
             </h1>
 
             <p className="max-w-2xl mx-auto text-base sm:text-lg text-orange-100 font-medium mb-10 leading-relaxed">
-              Find verified street food gems, live open/closed stalls, authentic heirloom chaats, dosas, momos, and chai spots near you.
+              {cityName
+                ? `Find approved street food vendors that are currently online in ${cityName}.`
+                : 'Choose a city or allow device location to find real street food vendors near you.'}
             </p>
+
+            <div
+              className="max-w-3xl mx-auto mb-8 rounded-3xl overflow-hidden shadow-xl text-left bg-gradient-to-r from-[#ff5e00] to-[#e64c00] touch-pan-y"
+              onMouseEnter={() => setPromoPaused(true)}
+              onMouseLeave={() => setPromoPaused(false)}
+              onPointerDown={event => { promoPointerStart.current = event.clientX; setPromoPaused(true); }}
+              onPointerUp={event => {
+                if (promoPointerStart.current === null) return;
+                const delta = event.clientX - promoPointerStart.current;
+                promoPointerStart.current = null;
+                if (Math.abs(delta) > 45) movePromo(delta < 0 ? 1 : -1);
+              }}
+              onPointerCancel={() => { promoPointerStart.current = null; setPromoPaused(false); }}
+            >
+              <div className="flex w-[300%] transition-transform duration-500 ease-out" style={{ transform: `translateX(-${activePromoSlide * 33.3333}%)` }}>
+                {promoSlides.map(slide => <div key={slide.eyebrow} className="flex w-1/3 shrink-0 items-center justify-between gap-6 p-5 sm:p-7 min-h-40 text-white">
+                  <div className="max-w-[65%]"><span className="text-[10px] font-black tracking-widest">{slide.eyebrow}</span><h2 className="mt-2 text-2xl sm:text-3xl font-black">{slide.title}</h2><p className="mt-1 text-sm text-orange-100">{slide.message}</p>{locationSource === 'gps' && <span className="mt-1 block text-[10px] text-orange-100">City data by Google Maps</span>}<button type="button" onClick={openExplore} className="mt-3 text-xs font-bold underline underline-offset-2">Explore results</button></div>
+                  <img src={slide.image} alt={slide.alt} className="h-28 w-28 sm:h-36 sm:w-36 shrink-0 rounded-full border-4 border-white/25 object-cover" draggable={false} />
+                </div>)}
+              </div>
+              <div className="flex justify-center gap-2 pb-3">{promoSlides.map((slide, index) => <button key={slide.eyebrow} type="button" aria-label={`Show promotion ${index + 1}`} aria-current={activePromoSlide === index} onClick={() => { pausePromo(); setActivePromoSlide(index); }} className={`h-1.5 rounded-full transition-all ${activePromoSlide === index ? 'w-6 bg-white' : 'w-1.5 bg-white/50'}`} />)}</div>
+            </div>
 
             {/* Search Box */}
             <form
@@ -421,19 +577,16 @@ export const Home: React.FC = () => {
 
               <div className="h-auto w-px bg-stone-200 mx-1" />
 
-              <div className="flex items-center gap-2 px-3 text-stone-600 w-44 shrink-0">
-                <MapPin className="w-4 h-4 text-orange-600 shrink-0" />
+              <div className="flex items-center gap-2 px-2 text-stone-600 w-56 shrink-0">
+                <button type="button" disabled={isDetectingLocation} onClick={() => void detectCurrentLocation()} title="Detect current device location" aria-label="Detect current device location" className="shrink-0 text-orange-600 disabled:opacity-40"><MapPin className="w-4 h-4" /></button>
                 <select
-                  value={selectedDesktopCity}
-                  onChange={(e) => setSelectedDesktopCity(e.target.value)}
+                  value={cityName}
+                  onChange={(e) => e.target.value ? setSelectedCity(e.target.value) : clearSelectedCity()}
                   className="w-full text-sm font-semibold bg-transparent outline-none cursor-pointer text-stone-800"
                 >
-                  <option value="All">All Cities</option>
-                  <option value="Mysuru">Mysuru</option>
-                  <option value="Bangalore">Bangalore</option>
-                  <option value="Mumbai">Mumbai</option>
-                  <option value="Delhi">Delhi</option>
-                  <option value="Jaipur">Jaipur</option>
+                  <option value="">Choose city</option>
+                  {cityName && !MANUAL_CITY_OPTIONS.some(city => city.toLowerCase() === cityName.toLowerCase()) && <option value={cityName}>{cityName}</option>}
+                  {MANUAL_CITY_OPTIONS.map(city => <option key={city} value={city}>{city}</option>)}
                 </select>
               </div>
 
@@ -466,7 +619,11 @@ export const Home: React.FC = () => {
               {CRAVING_CATEGORIES.map((item) => (
                 <button
                   key={item.id}
-                  onClick={() => navigate(`/explore?category=${encodeURIComponent(item.categoryKey)}`)}
+                  onClick={() => {
+                    const params = new URLSearchParams({ category: item.categoryKey });
+                    if (cityName) params.set('city', cityName);
+                    navigate(`/explore?${params.toString()}`);
+                  }}
                   className="flex flex-col items-center gap-2 p-2 rounded-2xl hover:bg-orange-50/50 dark:hover:bg-stone-800/80 transition group text-left"
                 >
                   <div className="w-full aspect-3/4 rounded-xl overflow-hidden border border-stone-200 dark:border-stone-700 group-hover:border-orange-400 group-hover:shadow-md transition">
@@ -490,7 +647,7 @@ export const Home: React.FC = () => {
                 <span>Verified Artisan Stalls</span>
               </div>
               <h2 className="text-2xl sm:text-3xl font-extrabold text-stone-900 dark:text-stone-100">
-                Top Rated Stalls Near You
+                {cityName ? `Top Rated Stalls in ${cityName}` : 'Top Rated Local Stalls'}
               </h2>
             </div>
 
@@ -498,7 +655,7 @@ export const Home: React.FC = () => {
               to="/explore"
               className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-orange-50 dark:bg-orange-950/40 text-orange-600 dark:text-orange-400 hover:bg-orange-100 font-bold text-xs transition"
             >
-              <span>Explore All {vendors.length} Vendors</span>
+              <span>Explore {cityName || 'local'} stalls</span>
               <ArrowRight className="w-4 h-4" />
             </Link>
           </div>

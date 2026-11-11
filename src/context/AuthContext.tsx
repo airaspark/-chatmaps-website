@@ -147,7 +147,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             const userDocRef = doc(firestore, 'users', fbUser.uid);
             const userDocSnap = await getDoc(userDocRef);
             if (!isActive || firebaseAuth.currentUser?.uid !== fbUser.uid) return;
-            if (userDocSnap.exists()) setUserProfile(userDocSnap.data() as UserProfile);
+            if (userDocSnap.exists()) {
+              const profile = userDocSnap.data() as UserProfile;
+              if (profile.status === 'suspended') {
+                setUserProfile(null);
+                await signOut(firebaseAuth);
+                return;
+              }
+              setUserProfile(profile);
+            }
             else setUserProfile((current) => current?.uid === fbUser.uid ? current : null);
           } catch (err) {
             console.error('Error fetching user profile:', err);
@@ -213,7 +221,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               await signOut(auth);
               throw new Error('This administrator account has been suspended.');
             }
-            if (aData.role === 'admin' || aData.status === 'active') {
+            if (aData.role === 'admin' && aData.status === 'active') {
               isAdminValid = true;
               adminProfile = {
                 uid: cred.user.uid,
@@ -232,9 +240,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             if (userDocSnap.exists()) {
               const uData = userDocSnap.data() as UserProfile;
               if (uData.role === 'admin') {
-                if (uData.status === 'suspended') {
+                if (uData.status !== 'active') {
                   await signOut(auth);
-                  throw new Error('This administrator account has been suspended.');
+                  throw new Error('This administrator account is not active.');
                 }
                 isAdminValid = true;
                 adminProfile = uData;
@@ -268,23 +276,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       }
 
-      // Local / Offline Simulated Auth
+      // Administrator access must always be backed by Firebase Auth and a verified Firestore role.
       if (requiredRole === 'admin') {
-        const isAdminEmail = email.toLowerCase().includes('admin') || email.toLowerCase() === 'admin@chatmaps.in';
-        if (!isAdminEmail) {
-          throw new Error('Access Denied: You do not have active administrator privileges on ChatMaps.');
-        }
-        const adminProfile: UserProfile = {
-          uid: 'admin-' + Math.random().toString(36).substring(2, 9),
-          email,
-          displayName: 'ChatMaps Administrator',
-          role: 'admin',
-          status: 'active',
-          createdAt: new Date().toISOString()
-        };
-        setUserProfile(adminProfile);
-        return adminProfile;
+        throw new Error('Administrator login requires a configured Firebase project. Demo or offline accounts cannot access the admin portal.');
       }
+
+      // Local / Offline Simulated Auth
 
       const demoRole: UserRole = requiredRole || (email.includes('vendor') ? 'vendor' : 'customer');
       const profile: UserProfile = {

@@ -15,6 +15,7 @@ import {
 
 export const LiveMap: React.FC = () => {
   const [vendors, setVendors] = useState<Vendor[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedVendor, setSelectedVendor] = useState<Vendor | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('all');
@@ -23,9 +24,12 @@ export const LiveMap: React.FC = () => {
   useEffect(() => {
     const unsubscribe = vendorService.subscribeToApprovedVendors((list) => {
       setVendors(list);
-      if (list.length > 0 && !selectedVendor) {
-        setSelectedVendor(list[0]);
-      }
+      setSelectedVendor(current => list.find(vendor => vendor.id === current?.id) || list[0] || null);
+      setLoadError(null);
+    }, error => {
+      setVendors([]);
+      setSelectedVendor(null);
+      setLoadError(error.message || 'Live vendor locations are unavailable.');
     });
     return () => unsubscribe();
   }, []);
@@ -50,6 +54,8 @@ export const LiveMap: React.FC = () => {
 
   return (
     <div className="relative flex h-[calc(100dvh-10rem)] min-h-[32rem] w-full flex-1 flex-col overflow-hidden md:h-[calc(100dvh-8rem)] xl:h-[calc(100dvh-4rem)]">
+      {loadError && <div role="alert" className="absolute bottom-4 left-4 right-4 z-40 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">{loadError}</div>}
+      {!loadError && filteredVendors.length === 0 && <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none"><div className="rounded-2xl border border-stone-200 bg-white/95 p-5 text-center shadow-xl"><MapPin className="w-7 h-7 text-stone-400 mx-auto mb-2"/><p className="text-sm font-bold text-stone-800">No vendors are currently online</p><p className="text-xs text-stone-500 mt-1">Approved carts appear when vendors share a fresh device location.</p></div></div>}
       {/* Floating Controls Bar at Top */}
       <div className="absolute top-4 left-4 right-4 z-20 pointer-events-none flex flex-col gap-2 max-w-2xl mx-auto">
         <div className="bg-white/95 backdrop-blur-md rounded-2xl p-2 shadow-xl border border-stone-200 pointer-events-auto flex items-center gap-2">

@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { adminService, AdminStats } from '../../services/adminService';
+import { adminService, AdminStats, isVendorLocationCurrent } from '../../services/adminService';
 import { Vendor, UserProfile, VendorApprovalStatus } from '../../types';
 import { VendorMap } from '../../components/map/VendorMap';
+import { getVendorCoverImage } from '../../data/foodImages';
 import {
   LayoutDashboard,
   Store,
@@ -18,7 +19,6 @@ import {
   RotateCcw,
   Eye,
   Edit,
-  Trash2,
   Menu,
   X,
   Phone,
@@ -35,9 +35,31 @@ import {
 export const AdminDashboard: React.FC = () => {
   const { userProfile, role, logout } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
 
-  // Navigation tabs
-  const [activeTab, setActiveTab] = useState<'overview' | 'vendors' | 'stalls' | 'customers' | 'map'>('overview');
+  type AdminTab = 'overview' | 'vendors' | 'stalls' | 'customers' | 'map';
+  const routeTabs: Record<string, AdminTab> = {
+    '/admin/dashboard': 'overview',
+    '/admin/vendor-applications': 'vendors',
+    '/admin/stall-management': 'stalls',
+    '/admin/customers': 'customers',
+    '/admin/live-map': 'map'
+  };
+  const activeTab = routeTabs[location.pathname] || 'overview';
+  const navigateAdminTab = (tab: AdminTab, status?: string) => {
+    const paths: Record<AdminTab, string> = {
+      overview: '/admin/dashboard',
+      vendors: '/admin/vendor-applications',
+      stalls: '/admin/stall-management',
+      customers: '/admin/customers',
+      map: '/admin/live-map'
+    };
+    navigate(status ? `${paths[tab]}?status=${encodeURIComponent(status)}` : paths[tab]);
+    if (status && tab === 'vendors') setVendorFilterStatus(status);
+    if (status && tab === 'stalls') setStallFilterStatus(status);
+    setMobileMenuOpen(false);
+  };
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // Data states
@@ -54,17 +76,25 @@ export const AdminDashboard: React.FC = () => {
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [customers, setCustomers] = useState<UserProfile[]>([]);
   const [loading, setLoading] = useState(true);
+  const [dataError, setDataError] = useState<string | null>(null);
+  const [dataNotice, setDataNotice] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Filters
   const [vendorFilterStatus, setVendorFilterStatus] = useState<string>('all');
   const [vendorSearch, setVendorSearch] = useState('');
+  const [stallSearch, setStallSearch] = useState('');
+  const [stallFilterStatus, setStallFilterStatus] = useState('all');
   const [customerSearch, setCustomerSearch] = useState('');
+  const [customerFilterStatus, setCustomerFilterStatus] = useState('all');
   const [selectedMapVendor, setSelectedMapVendor] = useState<Vendor | null>(null);
+  const [mapSearch, setMapSearch] = useState('');
+  const [mapCategory, setMapCategory] = useState('all');
+  const [nearbyCoords, setNearbyCoords] = useState<{ lat: number; lng: number } | null>(null);
 
   // Modal states for actions
   const [selectedVendorForAction, setSelectedVendorForAction] = useState<Vendor | null>(null);
-  const [actionType, setActionType] = useState<'approve' | 'reject' | 'suspend' | 'delete' | 'edit' | null>(null);
+  const [actionType, setActionType] = useState<'approve' | 'reject' | 'suspend' | 'edit' | null>(null);
   const [rejectionReason, setRejectionReason] = useState('');
   const [isSubmittingAction, setIsSubmittingAction] = useState(false);
 
@@ -78,25 +108,47 @@ export const AdminDashboard: React.FC = () => {
 
   // Customer action modal
   const [selectedCustomerForAction, setSelectedCustomerForAction] = useState<UserProfile | null>(null);
-  const [customerActionType, setCustomerActionType] = useState<'suspend' | 'delete' | null>(null);
+  const [customerActionType, setCustomerActionType] = useState<'suspend' | null>(null);
+  const [customerDetail, setCustomerDetail] = useState<UserProfile | null>(null);
+  const [customerActivity, setCustomerActivity] = useState<{ reviewCount: number; recentReviews: Array<{ id: string; vendorId?: string; rating?: number; comment?: string; createdAt?: string }> } | null>(null);
+  const [customerEdit, setCustomerEdit] = useState<UserProfile | null>(null);
+  const [vendorDetail, setVendorDetail] = useState<Vendor | null>(null);
+  const [vendorDetailTab, setVendorDetailTab] = useState<'details' | 'history'>('details');
+  const [availabilityUpdatingId, setAvailabilityUpdatingId] = useState<string | null>(null);
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(curr => (curr === msg ? null : curr)), 3500);
+  };
 
   // Load all admin data
-  const fetchData = async () => {
+  const fetchData = async (showSuccess = false) => {
     setLoading(true);
+    setDataError(null);
     try {
-      const [s, vList, cList] = await Promise.all([
-        adminService.getStats(),
+      const [vList, cList, ownerProfiles] = await Promise.all([
         adminService.getAllVendors(),
-        adminService.getAllCustomers()
+        adminService.getAllCustomers(),
+        adminService.getVendorOwnerProfiles()
       ]);
-      setStats(s);
-      setVendors(vList);
+      const vendorsWithOwnerEmail = vList.map(vendor => ({
+        ...vendor,
+        ownerEmail: vendor.ownerEmail || ownerProfiles.find(owner => owner.uid === vendor.ownerUid)?.email || ''
+      }));
+      setStats(adminService.getStats(vList, cList));
+      setVendors(vendorsWithOwnerEmail);
       setCustomers(cList);
-      if (vList.length > 0 && !selectedMapVendor) {
-        setSelectedMapVendor(vList.find(v => v.status === 'approved') || vList[0]);
+      if (vendorsWithOwnerEmail.length > 0 && !selectedMapVendor) {
+        setSelectedMapVendor(vendorsWithOwnerEmail.find(v => v.status === 'approved') || vendorsWithOwnerEmail[0]);
+      }
+      if (showSuccess) {
+        setDataNotice('Admin records refreshed from Firestore.');
+        showToast('Admin records refreshed from Firestore.');
       }
     } catch (err) {
-      console.warn('Error loading admin portal data:', err);
+      const message = err instanceof Error ? err.message : 'Could not load admin records from Firestore.';
+      setDataError(message);
+      showToast(message);
     } finally {
       setLoading(false);
     }
@@ -108,15 +160,60 @@ export const AdminDashboard: React.FC = () => {
       navigate('/admin', { replace: true });
       return;
     }
-    fetchData();
+    void fetchData();
   }, [userProfile, role, navigate]);
 
-  const showToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => {
-      setToastMessage(curr => (curr === msg ? null : curr));
-    }, 3500);
-  };
+  useEffect(() => {
+    if (!userProfile || userProfile.role !== 'admin') return;
+    let active = true;
+    try {
+      const unsubscribe = adminService.subscribeToData((vList, cList, owners) => {
+        if (!active) return;
+        const withEmails = vList.map(vendor => ({
+          ...vendor,
+          ownerEmail: vendor.ownerEmail || owners.find(owner => owner.uid === vendor.ownerUid)?.email || ''
+        }));
+        setVendors(withEmails);
+        setCustomers(cList);
+        setStats(adminService.getStats(vList, cList));
+        setDataError(null);
+        setLoading(false);
+      }, error => {
+        if (active) {
+          setDataError(error.message || 'Live Firestore updates failed.');
+          setLoading(false);
+        }
+      });
+      return () => { active = false; unsubscribe(); };
+    } catch (error) {
+      setDataError(error instanceof Error ? error.message : 'Live Firestore updates are unavailable.');
+      setLoading(false);
+    }
+    return () => { active = false; };
+  }, [userProfile?.uid, userProfile?.role]);
+
+  useEffect(() => {
+    if (activeTab === 'stalls') {
+      const status = searchParams.get('status');
+      if (status && ['all', 'pending', 'approved', 'rejected', 'suspended', 'online', 'offline'].includes(status)) setStallFilterStatus(status);
+      return;
+    }
+    if (activeTab === 'customers') {
+      const status = searchParams.get('status');
+      if (status && ['all', 'active', 'suspended'].includes(status)) setCustomerFilterStatus(status);
+      return;
+    }
+    if (activeTab !== 'vendors') return;
+    const status = searchParams.get('status');
+    if (status && ['all', 'pending', 'approved', 'rejected', 'suspended'].includes(status)) setVendorFilterStatus(status);
+  }, [activeTab, searchParams]);
+
+  // Re-evaluate location freshness while the page stays open. A vendor that
+  // stops sending GPS must disappear even when Firestore has no new snapshot.
+  useEffect(() => {
+    const timer = window.setInterval(() => setStats(adminService.getStats(vendors, customers)), 15_000);
+    return () => window.clearInterval(timer);
+  }, [vendors, customers]);
 
   // Actions on Vendors
   const handleApprove = async () => {
@@ -169,21 +266,6 @@ export const AdminDashboard: React.FC = () => {
     }
   };
 
-  const handleDeleteStall = async () => {
-    if (!selectedVendorForAction) return;
-    setIsSubmittingAction(true);
-    try {
-      await adminService.deleteStall(selectedVendorForAction.id);
-      showToast(`Listing "${selectedVendorForAction.shopName}" removed.`);
-      closeModals();
-      await fetchData();
-    } catch (e: any) {
-      showToast(e?.message || 'Failed to delete stall listing.');
-    } finally {
-      setIsSubmittingAction(false);
-    }
-  };
-
   const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedVendorForAction) return;
@@ -209,12 +291,15 @@ export const AdminDashboard: React.FC = () => {
 
   const handleToggleAvailability = async (vendor: Vendor) => {
     const nextState = !vendor.isOpen;
+    setAvailabilityUpdatingId(vendor.id);
     try {
       await adminService.updateStallAvailability(vendor.id, nextState);
       showToast(`"${vendor.shopName}" marked as ${nextState ? 'OPEN' : 'CLOSED'}.`);
       await fetchData();
     } catch (e: any) {
       showToast(e?.message || 'Failed to toggle availability.');
+    } finally {
+      setAvailabilityUpdatingId(null);
     }
   };
 
@@ -223,8 +308,9 @@ export const AdminDashboard: React.FC = () => {
     if (!selectedCustomerForAction) return;
     setIsSubmittingAction(true);
     try {
-      await adminService.toggleCustomerSuspension(selectedCustomerForAction.uid, selectedCustomerForAction.status);
-      showToast(`Customer account updated.`);
+      const nextStatus = selectedCustomerForAction.status === 'suspended' ? 'active' : 'suspended';
+      await adminService.updateCustomerStatus(selectedCustomerForAction.uid, nextStatus);
+      showToast(`Customer account ${nextStatus === 'suspended' ? 'suspended' : 'reactivated'}.`);
       closeModals();
       await fetchData();
     } catch (e: any) {
@@ -234,16 +320,31 @@ export const AdminDashboard: React.FC = () => {
     }
   };
 
-  const handleDeleteCustomer = async () => {
-    if (!selectedCustomerForAction) return;
+  const openCustomerDetail = async (customer: UserProfile) => {
+    setCustomerDetail(customer);
+    setCustomerActivity(null);
+    try {
+      setCustomerActivity(await adminService.getCustomerActivity(customer.uid));
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Customer activity could not be loaded.');
+    }
+  };
+
+  const handleSaveCustomer = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!customerEdit) return;
     setIsSubmittingAction(true);
     try {
-      await adminService.deleteCustomer(selectedCustomerForAction.uid);
-      showToast(`Customer account deleted.`);
-      closeModals();
+      await adminService.updateCustomerProfile(customerEdit.uid, {
+        displayName: customerEdit.displayName,
+        phone: customerEdit.phone || '',
+        city: customerEdit.city || ''
+      });
+      showToast('Customer profile updated.');
+      setCustomerEdit(null);
       await fetchData();
-    } catch (e: any) {
-      showToast(e?.message || 'Failed to delete customer.');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not update the customer profile.');
     } finally {
       setIsSubmittingAction(false);
     }
@@ -290,24 +391,75 @@ export const AdminDashboard: React.FC = () => {
       v.shopName.toLowerCase().includes(q) ||
       v.ownerName.toLowerCase().includes(q) ||
       v.phone.toLowerCase().includes(q) ||
-      v.address.toLowerCase().includes(q) ||
+      (v.ownerEmail || '').toLowerCase().includes(q) ||
       v.category.toLowerCase().includes(q);
 
     return matchesStatus && matchesSearch;
   });
 
+  const filteredStalls = vendors.filter(vendor => {
+    const online = isVendorLocationCurrent(vendor);
+    const matchesStatus = stallFilterStatus === 'all' ||
+      (stallFilterStatus === 'online' && online) ||
+      (stallFilterStatus === 'offline' && vendor.status === 'approved' && !online) ||
+      vendor.status === stallFilterStatus;
+    const q = stallSearch.trim().toLowerCase();
+    const matchesSearch = !q || [vendor.shopName, vendor.ownerName, vendor.phone, vendor.ownerEmail || '']
+      .some(value => value.toLowerCase().includes(q));
+    return matchesStatus && matchesSearch;
+  });
+
   const filteredCustomers = customers.filter(c => {
     const q = customerSearch.toLowerCase().trim();
-    return (
+    const matchesStatus = customerFilterStatus === 'all' ||
+      (customerFilterStatus === 'active' && c.status !== 'suspended') ||
+      (customerFilterStatus === 'suspended' && c.status === 'suspended');
+    return matchesStatus && (
       !q ||
-      c.displayName.toLowerCase().includes(q) ||
+      (c.displayName || '').toLowerCase().includes(q) ||
       c.email.toLowerCase().includes(q) ||
       (c.phone && c.phone.toLowerCase().includes(q)) ||
-      (c.city && c.city.toLowerCase().includes(q))
+      (c.city && c.city.toLowerCase().includes(q)) ||
+      c.uid.toLowerCase().includes(q)
     );
   });
 
-  const approvedVendorsForMap = vendors.filter(v => v.status === 'approved');
+  const liveVendors = vendors.filter(v => isVendorLocationCurrent(v));
+  const mapVendors = liveVendors.filter(vendor => {
+    const q = mapSearch.trim().toLowerCase();
+    const matchesSearch = !q || `${vendor.shopName} ${vendor.ownerName} ${vendor.ownerEmail || ''}`.toLowerCase().includes(q);
+    const matchesCategory = mapCategory === 'all' || vendor.category === mapCategory;
+    const matchesNearby = !nearbyCoords || !vendor.location || (() => {
+      const dLat = (vendor.location!.lat - nearbyCoords.lat) * Math.PI / 180;
+      const dLng = (vendor.location!.lng - nearbyCoords.lng) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) ** 2 + Math.cos(nearbyCoords.lat * Math.PI / 180) * Math.cos(vendor.location!.lat * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+      return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) <= 10;
+    })();
+    return matchesSearch && matchesCategory && matchesNearby;
+  });
+  const pendingApplications = vendors.filter(vendor => vendor.status === 'pending')
+    .sort((a, b) => Date.parse(b.createdAt || '') - Date.parse(a.createdAt || ''));
+
+  const requestNearbyMapLocation = () => {
+    if (!navigator.geolocation) {
+      showToast('This browser does not support location for nearby map filtering.');
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(position => {
+      if (position.coords.accuracy > 100) {
+        showToast(`Nearby filtering needs GPS accuracy of 100 metres or better. Current accuracy is ±${Math.round(position.coords.accuracy)}m.`);
+        setNearbyCoords(null);
+        return;
+      }
+      setNearbyCoords({ lat: position.coords.latitude, lng: position.coords.longitude });
+      showToast(`Nearby filter enabled using device GPS (±${Math.round(position.coords.accuracy)}m).`);
+    }, error => {
+      showToast(!window.isSecureContext
+        ? 'Nearby GPS requires HTTPS on mobile devices. Open ChatMaps on its secure domain.'
+        : error.code === error.PERMISSION_DENIED ? 'Location permission was denied.' : 'Could not determine device location for nearby filtering.');
+      setNearbyCoords(null);
+    }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+  };
 
   return (
     <div className="min-h-screen bg-[#0D0D0D] text-stone-100 flex flex-col md:flex-row antialiased selection:bg-orange-600 selection:text-white">
@@ -393,8 +545,7 @@ export const AdminDashboard: React.FC = () => {
                 <button
                   key={tab.id}
                   onClick={() => {
-                    setActiveTab(tab.id as any);
-                    setMobileMenuOpen(false);
+                    navigateAdminTab(tab.id as AdminTab);
                   }}
                   className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl font-bold text-xs transition active:scale-98 ${
                     isSelected
@@ -462,7 +613,7 @@ export const AdminDashboard: React.FC = () => {
           </div>
 
           <button
-            onClick={fetchData}
+            onClick={() => void fetchData(true)}
             disabled={loading}
             className="self-start sm:self-center flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-stone-900 hover:bg-stone-800 border border-stone-700 text-stone-300 hover:text-white text-xs font-bold transition active:scale-95"
           >
@@ -470,6 +621,10 @@ export const AdminDashboard: React.FC = () => {
             <span>Sync Data</span>
           </button>
         </div>
+
+        {dataError && <div role="alert" className="rounded-xl border border-rose-800 bg-rose-950/40 px-4 py-3 text-xs font-semibold text-rose-200">{dataError}</div>}
+        {dataNotice && <div role="status" className="rounded-xl border border-emerald-800 bg-emerald-950/30 px-4 py-3 text-xs font-semibold text-emerald-200">{dataNotice}</div>}
+        {loading && <div role="status" className="rounded-xl border border-stone-800 bg-[#141414] px-4 py-3 text-xs text-stone-300">Loading records from Firestore…</div>}
 
         {/* ========================================================
             TAB 1: OVERVIEW DASHBOARD
@@ -494,8 +649,7 @@ export const AdminDashboard: React.FC = () => {
                 </div>
                 <button
                   onClick={() => {
-                    setActiveTab('vendors');
-                    setVendorFilterStatus('pending');
+                    navigateAdminTab('vendors', 'pending');
                   }}
                   className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-stone-950 font-black text-xs rounded-xl shadow-md transition shrink-0"
                 >
@@ -506,69 +660,22 @@ export const AdminDashboard: React.FC = () => {
 
             {/* Stats Overview Grid */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 sm:gap-4">
-              <div className="bg-[#141414] rounded-2xl p-4 sm:p-5 border border-stone-800/90 shadow-xs space-y-1">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-stone-400">
-                  Registered Customers
-                </span>
-                <div className="text-2xl sm:text-3xl font-black text-white">{stats.totalCustomers}</div>
-                <p className="text-[10px] text-stone-500">Verified food lovers</p>
-              </div>
-
-              <div className="bg-[#141414] rounded-2xl p-4 sm:p-5 border border-stone-800/90 shadow-xs space-y-1">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-stone-400">
-                  Total Vendors
-                </span>
-                <div className="text-2xl sm:text-3xl font-black text-orange-500">{stats.totalVendors}</div>
-                <p className="text-[10px] text-stone-500">All applications</p>
-              </div>
-
-              <div className="bg-[#141414] rounded-2xl p-4 sm:p-5 border border-stone-800/90 shadow-xs space-y-1">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-amber-400">
-                  Pending Approvals
-                </span>
-                <div className="text-2xl sm:text-3xl font-black text-amber-400">{stats.pendingApprovals}</div>
-                <p className="text-[10px] text-stone-500">Awaiting review</p>
-              </div>
-
-              <div className="bg-[#141414] rounded-2xl p-4 sm:p-5 border border-stone-800/90 shadow-xs space-y-1">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400">
-                  Approved Vendors
-                </span>
-                <div className="text-2xl sm:text-3xl font-black text-emerald-400">{stats.approvedVendors}</div>
-                <p className="text-[10px] text-stone-500">Active public listings</p>
-              </div>
-
-              <div className="bg-[#141414] rounded-2xl p-4 sm:p-5 border border-stone-800/90 shadow-xs space-y-1">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-rose-400">
-                  Rejected Applications
-                </span>
-                <div className="text-2xl sm:text-3xl font-black text-rose-400">{stats.rejectedVendors}</div>
-                <p className="text-[10px] text-stone-500">Declined registrations</p>
-              </div>
-
-              <div className="bg-[#141414] rounded-2xl p-4 sm:p-5 border border-stone-800/90 shadow-xs space-y-1">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-stone-400">
-                  Suspended Vendors
-                </span>
-                <div className="text-2xl sm:text-3xl font-black text-stone-300">{stats.suspendedVendors}</div>
-                <p className="text-[10px] text-stone-500">Temporarily disabled</p>
-              </div>
-
-              <div className="bg-[#141414] rounded-2xl p-4 sm:p-5 border border-stone-800/90 shadow-xs space-y-1">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400">
-                  Active Stalls
-                </span>
-                <div className="text-2xl sm:text-3xl font-black text-emerald-400">{stats.activeStalls}</div>
-                <p className="text-[10px] text-stone-500">Open for business now</p>
-              </div>
-
-              <div className="bg-[#141414] rounded-2xl p-4 sm:p-5 border border-stone-800/90 shadow-xs space-y-1">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-stone-400">
-                  Closed Stalls
-                </span>
-                <div className="text-2xl sm:text-3xl font-black text-stone-400">{stats.closedStalls}</div>
-                <p className="text-[10px] text-stone-500">Currently shut</p>
-              </div>
+              {[
+                { label: 'Registered Customers', value: stats.totalCustomers, note: 'Customer accounts', color: 'text-white', tab: 'customers' as AdminTab },
+                { label: 'Total Vendors', value: stats.totalVendors, note: 'All stall records', color: 'text-orange-500', tab: 'stalls' as AdminTab },
+                { label: 'Pending Approvals', value: stats.pendingApprovals, note: 'Awaiting review', color: 'text-amber-400', tab: 'vendors' as AdminTab, status: 'pending' },
+                { label: 'Approved Vendors', value: stats.approvedVendors, note: 'Approved records', color: 'text-emerald-400', tab: 'stalls' as AdminTab, status: 'approved' },
+                { label: 'Rejected Applications', value: stats.rejectedVendors, note: 'Declined registrations', color: 'text-rose-400', tab: 'vendors' as AdminTab, status: 'rejected' },
+                { label: 'Suspended Vendors', value: stats.suspendedVendors, note: 'Temporarily disabled', color: 'text-stone-300', tab: 'stalls' as AdminTab, status: 'suspended' },
+                { label: 'Active Online Stalls', value: stats.activeStalls, note: 'Current verified GPS', color: 'text-emerald-400', tab: 'stalls' as AdminTab, status: 'online' },
+                { label: 'Offline Stalls', value: stats.closedStalls, note: 'Not currently online', color: 'text-stone-400', tab: 'stalls' as AdminTab, status: 'offline' }
+              ].map(card => (
+                <button key={card.label} onClick={() => navigateAdminTab(card.tab, card.status)} className="text-left bg-[#141414] rounded-2xl p-4 sm:p-5 border border-stone-800/90 shadow-xs space-y-1 hover:border-orange-500/70 focus:outline-none focus:ring-2 focus:ring-orange-500">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-stone-400">{card.label}</span>
+                  <div className={`text-2xl sm:text-3xl font-black ${card.color}`}>{card.value}</div>
+                  <p className="text-[10px] text-stone-500">{card.note} · View records</p>
+                </button>
+              ))}
             </div>
 
             {/* Quick Action Tables in Overview */}
@@ -582,8 +689,7 @@ export const AdminDashboard: React.FC = () => {
                   </h3>
                   <button
                     onClick={() => {
-                      setActiveTab('vendors');
-                      setVendorFilterStatus('pending');
+                      navigateAdminTab('vendors', 'pending');
                     }}
                     className="text-xs font-bold text-orange-400 hover:text-orange-300"
                   >
@@ -591,23 +697,23 @@ export const AdminDashboard: React.FC = () => {
                   </button>
                 </div>
 
-                {vendors.filter(v => v.status === 'pending').length === 0 ? (
+                {pendingApplications.length === 0 ? (
                   <p className="text-xs text-stone-500 py-6 text-center">
                     No pending vendor applications. All current stalls are reviewed!
                   </p>
                 ) : (
                   <div className="space-y-2.5">
-                    {vendors.filter(v => v.status === 'pending').slice(0, 3).map(v => (
+                    {pendingApplications.slice(0, 3).map(v => (
                       <div
                         key={v.id}
                         className="p-3 bg-stone-900 rounded-2xl border border-stone-800/80 flex items-center justify-between gap-3"
                       >
-                        <div className="min-w-0">
+                        <button onClick={() => setVendorDetail(v)} className="min-w-0 text-left">
                           <h4 className="font-bold text-xs text-white truncate">{v.shopName}</h4>
                           <p className="text-[11px] text-stone-400 truncate">
-                            {v.ownerName} • {v.phone} • {v.city}
+                            {v.ownerName} • {v.phone} • {v.city} • {v.createdAt ? new Date(v.createdAt).toLocaleDateString() : 'Date unavailable'}
                           </p>
-                        </div>
+                        </button>
                         <div className="flex items-center gap-1.5 shrink-0">
                           <button
                             onClick={() => {
@@ -730,7 +836,7 @@ export const AdminDashboard: React.FC = () => {
                     <div className="flex items-start gap-4">
                       <div className="w-20 h-20 rounded-2xl overflow-hidden bg-stone-900 border border-stone-800 shrink-0">
                         <img
-                          src={vendor.bannerImage || vendor.photos[0]}
+                          src={getVendorCoverImage(vendor)}
                           alt={vendor.shopName}
                           className="w-full h-full object-cover"
                         />
@@ -773,6 +879,8 @@ export const AdminDashboard: React.FC = () => {
                             <Phone className="w-3 h-3 text-orange-400" />
                             <span>{vendor.phone}</span>
                           </span>
+                      <span className="flex items-center gap-1"><Mail className="w-3 h-3 text-orange-400" />{vendor.ownerEmail || 'Email unavailable'}</span>
+                      <span>Submitted: {vendor.createdAt ? new Date(vendor.createdAt).toLocaleDateString() : 'Unknown'}</span>
                           <span className="flex items-center gap-1">
                             <MapPin className="w-3 h-3 text-orange-400" />
                             <span>{vendor.address}, {vendor.city}</span>
@@ -789,6 +897,7 @@ export const AdminDashboard: React.FC = () => {
 
                     {/* Right: Moderation Actions */}
                     <div className="flex items-center gap-2 flex-wrap self-end lg:self-center">
+                      <button onClick={() => { setVendorDetail(vendor); setVendorDetailTab('details'); }} className="px-3 py-2 bg-stone-900 border border-stone-800 text-stone-300 font-bold text-xs rounded-xl">View Details</button>
                       {vendor.status === 'pending' && (
                         <>
                           <button
@@ -844,16 +953,6 @@ export const AdminDashboard: React.FC = () => {
                         <Edit className="w-4 h-4" />
                       </button>
 
-                      <button
-                        onClick={() => {
-                          setSelectedVendorForAction(vendor);
-                          setActionType('delete');
-                        }}
-                        className="p-2 rounded-xl bg-stone-900 hover:bg-rose-950/60 text-stone-400 hover:text-rose-400 border border-stone-800"
-                        title="Remove Listing"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
                     </div>
                   </div>
                 ))
@@ -869,9 +968,9 @@ export const AdminDashboard: React.FC = () => {
           <div className="space-y-4">
             <div className="bg-[#141414] rounded-3xl p-5 border border-stone-800 flex items-center justify-between">
               <div>
-                <h3 className="font-extrabold text-sm text-white">Live Stall Directory</h3>
+                <h3 className="font-extrabold text-sm text-white">Stall Directory</h3>
                 <p className="text-xs text-stone-400">
-                  Toggle stall availability in real-time or edit street location information.
+                  All registered stalls, including vendors who are currently offline.
                 </p>
               </div>
               <span className="text-xs font-black text-orange-500 bg-orange-950/40 px-3 py-1 rounded-full border border-orange-800">
@@ -879,8 +978,20 @@ export const AdminDashboard: React.FC = () => {
               </span>
             </div>
 
+            <div className="flex flex-col lg:flex-row gap-3 lg:items-center lg:justify-between">
+              <div className="relative flex-1 max-w-lg">
+                <Search className="w-4 h-4 text-stone-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                <input value={stallSearch} onChange={event => setStallSearch(event.target.value)} placeholder="Search shop, owner, phone, or email" className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-[#141414] border border-stone-800 text-xs font-semibold text-white outline-none focus:border-orange-500" />
+              </div>
+              <div className="flex gap-1.5 overflow-x-auto">
+                {['all', 'pending', 'approved', 'rejected', 'online', 'offline', 'suspended'].map(status => (
+                  <button key={status} onClick={() => setStallFilterStatus(status)} className={`px-3 py-1.5 rounded-xl text-xs font-bold capitalize shrink-0 ${stallFilterStatus === status ? 'bg-orange-600 text-white' : 'bg-[#141414] border border-stone-800 text-stone-400'}`}>{status}</button>
+                ))}
+              </div>
+            </div>
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {vendors.map((stall) => (
+              {filteredStalls.map((stall) => (
                 <div
                   key={stall.id}
                   className="bg-[#141414] rounded-3xl p-5 border border-stone-800 space-y-3 flex flex-col justify-between"
@@ -895,40 +1006,25 @@ export const AdminDashboard: React.FC = () => {
                         <p className="text-xs text-stone-400">{stall.address}, {stall.city}</p>
                       </div>
 
-                      {/* Live Open / Closed Switch Button */}
-                      <button
-                        onClick={() => handleToggleAvailability(stall)}
-                        className={`px-3 py-1.5 rounded-full text-xs font-black transition flex items-center gap-1.5 shadow-xs ${
-                          stall.isOpen
-                            ? 'bg-emerald-500 text-white hover:bg-emerald-600'
-                            : 'bg-stone-800 text-stone-400 hover:bg-stone-700 hover:text-white'
-                        }`}
-                        title="Toggle Stall Availability"
-                      >
-                        <span className={`w-2 h-2 rounded-full ${stall.isOpen ? 'bg-white animate-pulse' : 'bg-stone-500'}`} />
-                        <span>{stall.isOpen ? 'OPEN' : 'CLOSED'}</span>
-                      </button>
+                      <span className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase ${isVendorLocationCurrent(stall) ? 'bg-emerald-950 text-emerald-300' : 'bg-stone-900 text-stone-400'}`}>{isVendorLocationCurrent(stall) ? 'ONLINE' : 'OFFLINE'}</span>
                     </div>
 
-                    <div className="flex items-center gap-4 text-xs text-stone-400 pt-1">
+                    <div className="flex items-center gap-x-4 gap-y-1 text-xs text-stone-400 pt-1 flex-wrap">
                       <span>Owner: <strong>{stall.ownerName}</strong></span>
+                      <span>{stall.phone}</span><span>{stall.ownerEmail || 'Email unavailable'}</span>
                       <span>Status: <strong className="capitalize">{stall.status}</strong></span>
-                      <span>Rating: ★{stall.rating}</span>
+                      <span>Last GPS: {stall.lastLocationAt ? new Date(stall.lastLocationAt).toLocaleString() : 'Never'}</span>
+                      <span>Registered: {stall.createdAt ? new Date(stall.createdAt).toLocaleDateString() : 'Unknown'}</span>
                     </div>
                   </div>
 
-                  <div className="pt-3 border-t border-stone-800/80 flex items-center justify-between">
-                    <a
-                      href={`https://www.google.com/maps/dir/?api=1&destination=${stall.location.lat},${stall.location.lng}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-xs font-semibold text-orange-400 hover:underline flex items-center gap-1"
-                    >
-                      <Compass className="w-3.5 h-3.5" />
-                      <span>Directions</span>
-                    </a>
-
-                    <div className="flex items-center gap-2">
+                  <div className="pt-3 border-t border-stone-800/80 flex flex-wrap items-center justify-end gap-2">
+                      <button onClick={() => { setVendorDetail(stall); setVendorDetailTab('details'); }} className="px-3 py-1.5 rounded-xl bg-stone-900 text-stone-300 text-xs font-bold">View Details</button>
+                      <button onClick={() => { setVendorDetail(stall); setVendorDetailTab('history'); }} className="px-3 py-1.5 rounded-xl bg-stone-900 text-stone-300 text-xs font-bold">Application History</button>
+                      {isVendorLocationCurrent(stall) && <button onClick={() => { setSelectedMapVendor(stall); navigateAdminTab('map'); }} className="px-3 py-1.5 rounded-xl bg-emerald-950 text-emerald-300 text-xs font-bold">View Live Location</button>}
+                      <button disabled={availabilityUpdatingId === stall.id} onClick={() => void handleToggleAvailability(stall)} className="px-3 py-1.5 rounded-xl bg-stone-900 text-stone-300 text-xs font-bold disabled:opacity-50">{availabilityUpdatingId === stall.id ? 'Saving…' : `Mark ${stall.isOpen ? 'Closed' : 'Open'}`}</button>
+                      {stall.status === 'pending' && <button onClick={() => { setSelectedVendorForAction(stall); setActionType('approve'); }} className="px-3 py-1.5 rounded-xl bg-emerald-700 text-white text-xs font-bold">Approve</button>}
+                      {stall.status === 'pending' && <button onClick={() => { setSelectedVendorForAction(stall); setActionType('reject'); }} className="px-3 py-1.5 rounded-xl bg-rose-900 text-white text-xs font-bold">Reject</button>}
                       <button
                         onClick={() => openEditModal(stall)}
                         className="px-3 py-1.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-300 text-xs font-bold transition flex items-center gap-1"
@@ -936,19 +1032,11 @@ export const AdminDashboard: React.FC = () => {
                         <Edit className="w-3 h-3" />
                         <span>Edit</span>
                       </button>
-                      <button
-                        onClick={() => {
-                          setSelectedVendorForAction(stall);
-                          setActionType('delete');
-                        }}
-                        className="p-1.5 rounded-xl bg-stone-900 hover:bg-rose-900/60 text-stone-400 hover:text-rose-400 transition"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
+                      {(stall.status === 'approved' || stall.status === 'suspended') && <button onClick={() => { setSelectedVendorForAction(stall); setActionType('suspend'); }} className="px-3 py-1.5 rounded-xl bg-stone-900 text-stone-300 text-xs font-bold">{stall.status === 'suspended' ? 'Reactivate' : 'Suspend'}</button>}
                   </div>
                 </div>
               ))}
+              {!loading && filteredStalls.length === 0 && <div className="md:col-span-2 bg-[#141414] rounded-3xl p-10 text-center text-xs text-stone-400 border border-stone-800">No Firestore vendor records match these filters.</div>}
             </div>
           </div>
         )}
@@ -958,16 +1046,15 @@ export const AdminDashboard: React.FC = () => {
             ======================================================== */}
         {activeTab === 'customers' && (
           <div className="space-y-4">
-            {/* Customer Search Bar */}
-            <div className="relative max-w-md">
-              <Search className="w-4 h-4 text-stone-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                value={customerSearch}
-                onChange={(e) => setCustomerSearch(e.target.value)}
-                placeholder="Search customers by name, email, city..."
-                className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-[#141414] border border-stone-800 text-xs font-semibold text-white outline-none focus:border-orange-500"
-              />
+            <div className="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
+              <div className="relative max-w-md flex-1">
+                <Search className="w-4 h-4 text-stone-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                <input type="text" value={customerSearch} onChange={(e) => setCustomerSearch(e.target.value)} placeholder="Search customer name, email, phone, or UID" className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-[#141414] border border-stone-800 text-xs font-semibold text-white outline-none focus:border-orange-500" />
+              </div>
+              <div className="flex gap-2">
+                {['all', 'active', 'suspended'].map(status => <button key={status} onClick={() => setCustomerFilterStatus(status)} className={`px-3 py-1.5 rounded-xl text-xs font-bold capitalize ${customerFilterStatus === status ? 'bg-orange-600 text-white' : 'bg-[#141414] border border-stone-800 text-stone-400'}`}>{status}</button>)}
+                <button onClick={() => void fetchData(true)} disabled={loading} className="px-3 py-1.5 rounded-xl text-xs font-bold bg-stone-900 border border-stone-700 text-stone-300 disabled:opacity-50">Refresh</button>
+              </div>
             </div>
 
             {/* Customers Table / Cards */}
@@ -1002,14 +1089,16 @@ export const AdminDashboard: React.FC = () => {
                         </div>
 
                         <p className="text-xs text-stone-400">
-                          {cust.email} • {cust.phone || 'No phone'} • City: {cust.city || 'Bangalore'}
+                          {cust.email} • {cust.phone || 'No phone'} • City: {cust.city || 'Not provided'}
                         </p>
                         <p className="text-[11px] text-stone-500">
-                          Dietary: <span className="capitalize font-semibold text-stone-400">{cust.dietaryPreference || 'All'}</span> • Joined: {new Date(cust.createdAt).toLocaleDateString()}
+                          UID: <code>{cust.uid}</code> • Joined: {cust.createdAt ? new Date(cust.createdAt).toLocaleDateString() : 'Unknown'}
                         </p>
                       </div>
 
-                      <div className="flex items-center gap-2 self-end sm:self-center">
+                      <div className="flex flex-wrap items-center gap-2 self-end sm:self-center">
+                        <button onClick={() => void openCustomerDetail(cust)} className="px-3 py-1.5 rounded-xl bg-stone-900 border border-stone-800 text-stone-300 text-xs font-bold">View Profile & Activity</button>
+                        <button onClick={() => setCustomerEdit({ ...cust })} className="px-3 py-1.5 rounded-xl bg-stone-900 border border-stone-800 text-stone-300 text-xs font-bold">Edit Profile</button>
                         <button
                           onClick={() => {
                             setSelectedCustomerForAction(cust);
@@ -1022,16 +1111,6 @@ export const AdminDashboard: React.FC = () => {
                           }`}
                         >
                           {cust.status === 'suspended' ? 'Reactivate' : 'Suspend'}
-                        </button>
-                        <button
-                          onClick={() => {
-                            setSelectedCustomerForAction(cust);
-                            setCustomerActionType('delete');
-                          }}
-                          className="p-2 rounded-xl bg-stone-900 hover:bg-rose-950/60 text-stone-400 hover:text-rose-400 border border-stone-800 transition"
-                          title="Delete Customer Account"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </div>
                     </div>
@@ -1051,7 +1130,7 @@ export const AdminDashboard: React.FC = () => {
               <div>
                 <h3 className="font-extrabold text-sm text-white">Live Stall Geographic Map</h3>
                 <p className="text-xs text-stone-400">
-                  Inspect all {approvedVendorsForMap.length} approved street stalls with ChatMaps custom orange pins.
+                  Showing {mapVendors.length} approved vendors with a fresh device location and accurate GPS fix.
                 </p>
               </div>
               <span className="text-xs text-emerald-400 bg-emerald-950/50 px-3 py-1 rounded-full border border-emerald-800 font-bold">
@@ -1059,15 +1138,28 @@ export const AdminDashboard: React.FC = () => {
               </span>
             </div>
 
-            <div className="h-[600px] rounded-3xl overflow-hidden border border-stone-800 shadow-2xl relative">
-              <VendorMap
-                vendors={approvedVendorsForMap}
-                selectedVendor={selectedMapVendor}
-                onSelectVendor={setSelectedMapVendor}
-                className="h-full w-full"
-                showCardOverlay={true}
-              />
+            <div className="flex flex-col md:flex-row gap-2">
+              <input value={mapSearch} onChange={event => setMapSearch(event.target.value)} placeholder="Search vendor or stall" className="flex-1 px-3.5 py-2.5 rounded-xl bg-[#141414] border border-stone-800 text-xs text-white outline-none focus:border-orange-500" />
+              <select value={mapCategory} onChange={event => setMapCategory(event.target.value)} className="px-3.5 py-2.5 rounded-xl bg-[#141414] border border-stone-800 text-xs text-white">
+                <option value="all">All Food Categories</option>
+                {[...new Set(liveVendors.map(vendor => vendor.category))].sort().map(category => <option key={category} value={category}>{category}</option>)}
+              </select>
+              <button onClick={requestNearbyMapLocation} className="px-3.5 py-2.5 rounded-xl bg-stone-900 border border-stone-800 text-stone-200 text-xs font-bold">{nearbyCoords ? 'Nearby GPS On' : 'Nearby (use GPS)'}</button>
+              {nearbyCoords && <button onClick={() => setNearbyCoords(null)} className="px-3.5 py-2.5 rounded-xl bg-stone-900 border border-stone-800 text-stone-400 text-xs font-bold">Clear Nearby</button>}
+              <button onClick={() => void fetchData(true)} disabled={loading} className="px-3.5 py-2.5 rounded-xl bg-stone-900 border border-stone-800 text-stone-200 text-xs font-bold disabled:opacity-50"><RotateCcw className={`inline w-3.5 h-3.5 mr-1 ${loading ? 'animate-spin' : ''}`} />Refresh</button>
             </div>
+
+            {mapVendors.length === 0 ? (
+              <div className="min-h-[360px] rounded-3xl border border-stone-800 bg-[#141414] flex flex-col items-center justify-center p-8 text-center">
+                <MapPin className="w-8 h-8 text-stone-600 mb-3" />
+                <h4 className="font-bold text-white">No vendors are currently online</h4>
+                <p className="text-xs text-stone-400 mt-1 max-w-md">Approved vendors appear here only while online with a valid, fresh device location. Offline records remain in Stall Management.</p>
+              </div>
+            ) : (
+              <div className="h-[min(72vh,720px)] min-h-[360px] rounded-3xl overflow-hidden border border-stone-800 shadow-2xl relative">
+                <VendorMap vendors={mapVendors} selectedVendor={mapVendors.find(v => v.id === selectedMapVendor?.id) || null} onSelectVendor={setSelectedMapVendor} className="h-full w-full" showCardOverlay />
+              </div>
+            )}
           </div>
         )}
       </main>
@@ -1176,36 +1268,6 @@ export const AdminDashboard: React.FC = () => {
         </div>
       )}
 
-      {/* 4. Delete Stall Listing Modal */}
-      {actionType === 'delete' && selectedVendorForAction && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-[#141414] rounded-3xl p-6 max-w-sm w-full border border-stone-800 shadow-2xl space-y-4">
-            <div className="flex items-center gap-2 text-rose-500 font-extrabold text-base">
-              <Trash2 className="w-5 h-5" />
-              <span>Remove Listing</span>
-            </div>
-            <p className="text-xs text-stone-300 leading-relaxed">
-              Are you sure you want to permanently remove <strong>{selectedVendorForAction.shopName}</strong>? This action cannot be undone.
-            </p>
-            <div className="flex gap-2 justify-end pt-2">
-              <button
-                onClick={closeModals}
-                className="px-4 py-2 rounded-xl text-xs font-semibold text-stone-400 hover:bg-stone-900"
-              >
-                Cancel
-              </button>
-              <button
-                disabled={isSubmittingAction}
-                onClick={handleDeleteStall}
-                className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white shadow-md"
-              >
-                {isSubmittingAction ? 'Deleting...' : 'Delete Listing'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* 5. Edit Vendor Details Modal */}
       {actionType === 'edit' && selectedVendorForAction && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
@@ -1307,39 +1369,83 @@ export const AdminDashboard: React.FC = () => {
         </div>
       )}
 
-      {/* 6. Customer Action Modal (Suspend / Delete) */}
-      {customerActionType && selectedCustomerForAction && (
+      {/* Customer suspend/reactivate confirmation */}
+      {customerActionType === 'suspend' && selectedCustomerForAction && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-[#141414] rounded-3xl p-6 max-w-sm w-full border border-stone-800 shadow-2xl space-y-4">
-            <div className="flex items-center gap-2 text-rose-400 font-extrabold text-base">
-              {customerActionType === 'delete' ? <Trash2 className="w-5 h-5" /> : <Ban className="w-5 h-5" />}
-              <span>{customerActionType === 'delete' ? 'Delete Customer Account' : 'Change Account Status'}</span>
+            <div className="flex items-center gap-2 text-amber-400 font-extrabold text-base">
+              <Ban className="w-5 h-5" />
+              <span>{selectedCustomerForAction.status === 'suspended' ? 'Reactivate Customer' : 'Suspend Customer'}</span>
             </div>
             <p className="text-xs text-stone-300 leading-relaxed">
-              {customerActionType === 'delete'
-                ? `Permanently delete account for ${selectedCustomerForAction.displayName} (${selectedCustomerForAction.email})?`
-                : `${selectedCustomerForAction.status === 'suspended' ? 'Reactivate' : 'Suspend'} account for ${selectedCustomerForAction.displayName}?`}
+              {selectedCustomerForAction.status === 'suspended' ? 'Restore this customer account?' : 'Suspend this customer account? Existing profile and authentication identity will be retained.'}
             </p>
             <div className="flex gap-2 justify-end pt-2">
-              <button
-                onClick={closeModals}
-                className="px-4 py-2 rounded-xl text-xs font-semibold text-stone-400 hover:bg-stone-900"
-              >
-                Cancel
-              </button>
-              <button
-                disabled={isSubmittingAction}
-                onClick={customerActionType === 'delete' ? handleDeleteCustomer : handleToggleCustomerSuspend}
-                className={`px-4 py-2 rounded-xl text-xs font-bold text-white shadow-md ${
-                  customerActionType === 'delete' ? 'bg-rose-600 hover:bg-rose-500' : 'bg-orange-600 hover:bg-orange-500'
-                }`}
-              >
-                {isSubmittingAction ? 'Processing...' : 'Confirm'}
+              <button onClick={closeModals} className="px-4 py-2 rounded-xl text-xs font-semibold text-stone-400 hover:bg-stone-900">Cancel</button>
+              <button disabled={isSubmittingAction} onClick={handleToggleCustomerSuspend} className="px-4 py-2 rounded-xl text-xs font-bold bg-orange-600 hover:bg-orange-500 text-white shadow-md">
+                {isSubmittingAction ? 'Processing…' : 'Confirm'}
               </button>
             </div>
           </div>
         </div>
       )}
+
+      {vendorDetail && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4" role="dialog" aria-modal="true" aria-label="Vendor details">
+          <div className="bg-[#141414] rounded-3xl p-5 sm:p-6 max-w-2xl max-h-[90vh] overflow-y-auto w-full border border-stone-800 shadow-2xl space-y-4">
+            <div className="flex justify-between items-start gap-3">
+              <div><h3 className="font-extrabold text-lg text-white">{vendorDetail.shopName}</h3><p className="text-xs text-stone-400">{vendorDetail.ownerName} · {vendorDetail.status}</p></div>
+              <button aria-label="Close" onClick={() => setVendorDetail(null)} className="p-1 text-stone-400 hover:text-white"><X className="w-5 h-5" /></button>
+            </div>
+            <div className="flex gap-2 border-b border-stone-800 pb-2">
+              <button onClick={() => setVendorDetailTab('details')} className={`px-3 py-1.5 rounded-lg text-xs font-bold ${vendorDetailTab === 'details' ? 'bg-orange-600 text-white' : 'text-stone-400'}`}>Submitted Details</button>
+              <button onClick={() => setVendorDetailTab('history')} className={`px-3 py-1.5 rounded-lg text-xs font-bold ${vendorDetailTab === 'history' ? 'bg-orange-600 text-white' : 'text-stone-400'}`}>Application History</button>
+            </div>
+            {vendorDetailTab === 'details' ? (
+              <div className="grid sm:grid-cols-2 gap-3 text-xs text-stone-300">
+                {[
+                  ['Owner', vendorDetail.ownerName], ['Phone', vendorDetail.phone], ['Email', vendorDetail.ownerEmail || 'Unavailable'],
+                  ['Category', vendorDetail.category], ['Address', `${vendorDetail.address || ''} ${vendorDetail.city || ''}`.trim()],
+                  ['Submitted', vendorDetail.createdAt ? new Date(vendorDetail.createdAt).toLocaleString() : 'Unavailable'],
+                  ['Status', vendorDetail.status], ['Rejection reason', vendorDetail.rejectionReason || 'None']
+                ].map(([label, value]) => <div key={label} className="rounded-xl bg-stone-900 p-3"><span className="block text-stone-500">{label}</span><span>{value}</span></div>)}
+                <div className="sm:col-span-2"><p className="text-stone-400 mb-2">Submitted photographs</p><div className="flex flex-wrap gap-2">{(vendorDetail.photos || []).length ? vendorDetail.photos.map((photo, index) => <a key={`${photo}-${index}`} href={photo} target="_blank" rel="noreferrer"><img src={photo} alt={`${vendorDetail.shopName} submitted ${index + 1}`} className="w-24 h-24 object-cover rounded-xl" /></a>) : <span className="text-stone-500">No photographs submitted.</span>}</div></div>
+              </div>
+            ) : (
+              <div className="space-y-3 text-xs text-stone-300">
+                <p>Registration: {vendorDetail.createdAt ? new Date(vendorDetail.createdAt).toLocaleString() : 'Date unavailable'}</p>
+                <p>Rejection reason: {vendorDetail.rejectionReason || 'None recorded'}</p>
+                {(vendorDetail.statusHistory || []).length === 0 ? <p className="text-stone-500">No status transition history is recorded for this application yet.</p> : (
+                  <ol className="space-y-2">{vendorDetail.statusHistory!.map((event, index) => <li key={`${event.at}-${index}`} className="rounded-xl bg-stone-900 p-3"><strong className="capitalize">{event.from} → {event.to}</strong><span className="block text-stone-500 mt-1">{new Date(event.at).toLocaleString()} · Admin UID: {event.actorUid || 'Unavailable'}</span></li>)}</ol>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {customerDetail && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4" role="dialog" aria-modal="true" aria-label="Customer profile">
+          <div className="bg-[#141414] rounded-3xl p-5 sm:p-6 max-w-lg max-h-[90vh] overflow-y-auto w-full border border-stone-800 shadow-2xl space-y-4">
+            <div className="flex justify-between items-start"><div><h3 className="font-extrabold text-lg text-white">{customerDetail.displayName}</h3><p className="text-xs text-stone-400">{customerDetail.email}</p></div><button onClick={() => setCustomerDetail(null)} aria-label="Close" className="text-stone-400"><X className="w-5 h-5" /></button></div>
+            <div className="grid grid-cols-2 gap-2 text-xs text-stone-300"><p>Phone: {customerDetail.phone || 'Not provided'}</p><p>Status: {customerDetail.status || 'active'}</p><p>UID: <code className="break-all">{customerDetail.uid}</code></p><p>Registered: {customerDetail.createdAt ? new Date(customerDetail.createdAt).toLocaleDateString() : 'Unavailable'}</p></div>
+            <section><h4 className="text-sm font-bold text-white">Account activity</h4>{customerActivity ? <><p className="text-xs text-stone-400 mt-1">{customerActivity.reviewCount} recorded reviews</p><div className="mt-2 space-y-2">{customerActivity.recentReviews.length ? customerActivity.recentReviews.map(review => <div key={review.id} className="rounded-xl bg-stone-900 p-3 text-xs text-stone-300"><p>Rating: {review.rating ?? 'Not provided'} · Stall ID: {review.vendorId || 'Unavailable'}</p><p>{review.comment || 'No written comment'}</p><p className="text-stone-500">{review.createdAt ? new Date(review.createdAt).toLocaleString() : 'Date unavailable'}</p></div>) : <p className="text-xs text-stone-500">No review activity found.</p>}</div></> : <p className="text-xs text-stone-400 mt-1">Loading recorded activity…</p>}</section>
+          </div>
+        </div>
+      )}
+
+      {customerEdit && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4" role="dialog" aria-modal="true" aria-label="Edit customer profile">
+          <form onSubmit={handleSaveCustomer} className="bg-[#141414] rounded-3xl p-5 sm:p-6 max-w-md max-h-[90vh] overflow-y-auto w-full border border-stone-800 shadow-2xl space-y-3">
+            <div className="flex justify-between items-center"><h3 className="font-extrabold text-white">Edit Customer Profile</h3><button type="button" onClick={() => setCustomerEdit(null)} aria-label="Close" className="text-stone-400"><X className="w-5 h-5" /></button></div>
+            <label className="block text-xs text-stone-300">Name<input required maxLength={100} value={customerEdit.displayName} onChange={event => setCustomerEdit({ ...customerEdit, displayName: event.target.value })} className="mt-1 w-full rounded-xl bg-stone-900 border border-stone-800 p-2.5 text-white" /></label>
+            <label className="block text-xs text-stone-300">Phone<input maxLength={30} value={customerEdit.phone || ''} onChange={event => setCustomerEdit({ ...customerEdit, phone: event.target.value })} className="mt-1 w-full rounded-xl bg-stone-900 border border-stone-800 p-2.5 text-white" /></label>
+            <label className="block text-xs text-stone-300">City<input maxLength={100} value={customerEdit.city || ''} onChange={event => setCustomerEdit({ ...customerEdit, city: event.target.value })} className="mt-1 w-full rounded-xl bg-stone-900 border border-stone-800 p-2.5 text-white" /></label>
+            <div className="flex justify-end gap-2"><button type="button" onClick={() => setCustomerEdit(null)} className="px-3 py-2 text-xs text-stone-400">Cancel</button><button disabled={isSubmittingAction} className="px-3 py-2 rounded-xl bg-orange-600 text-white text-xs font-bold">{isSubmittingAction ? 'Saving…' : 'Save Changes'}</button></div>
+          </form>
+        </div>
+      )}
+
     </div>
   );
 };

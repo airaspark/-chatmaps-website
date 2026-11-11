@@ -2,26 +2,24 @@ import React, { useState } from 'react';
 import { Menu, MapPin, ChevronDown, Bell, X, Navigation, Check } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useApp } from '../../context/AppContext';
+import { MANUAL_CITY_OPTIONS } from '../../data/cities';
 
 interface MobileHeaderProps {
   onOpenMobileMenu: () => void;
 }
-
-const INDIAN_FOOD_CITIES = [
-  'Mysuru',
-  'Bengaluru (Indiranagar / VV Puram)',
-  'Mumbai (Vile Parle / Chowpatty)',
-  'Delhi (Chandni Chowk)',
-  'Jaipur (Badi Chaupar)',
-  'Kolkata (Park Street)',
-  'Hyderabad (Charminar)'
-];
 
 export const MobileHeader: React.FC<MobileHeaderProps> = ({ onOpenMobileMenu }) => {
   const { userProfile } = useAuth();
   const {
     selectedCity,
     setSelectedCity,
+    selectedState,
+    selectedLocality,
+    locationSource,
+    locationError,
+    isDetectingLocation,
+    detectCurrentLocation,
+    clearSelectedCity,
     gpsActive,
     toggleGps,
     notifications,
@@ -32,9 +30,10 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({ onOpenMobileMenu }) 
 
   const [showLocationModal, setShowLocationModal] = useState(false);
   const [showNotificationsModal, setShowNotificationsModal] = useState(false);
+  const [manualCityInput, setManualCityInput] = useState('');
 
-  // Name from profile or default 'Suri' (matching user's Android app screenshot)
-  const customerName = userProfile?.displayName || 'Suri';
+  // Name from profile or the existing branded greeting default.
+  const customerName = userProfile?.displayName || 'Guest';
 
   const handleOpenNotifications = () => {
     setShowNotificationsModal(true);
@@ -67,9 +66,10 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({ onOpenMobileMenu }) 
               className="flex items-center gap-1 text-[11px] sm:text-xs text-amber-400 font-semibold hover:text-amber-300 transition text-left mt-0.5"
             >
               <MapPin className="w-3.5 h-3.5 text-orange-500 shrink-0" />
-              <span className="truncate max-w-[170px] sm:max-w-xs">{selectedCity}</span>
+              <span className="truncate max-w-[170px] sm:max-w-xs">{selectedCity ? [selectedLocality, selectedCity, selectedState].filter(Boolean).join(', ') : 'Choose your location'}</span>
               <ChevronDown className="w-3.5 h-3.5 text-stone-400 shrink-0" />
             </button>
+            {selectedCity && <span className="mt-0.5 block pl-5 text-[9px] text-stone-400">{locationSource === 'manual' ? 'Manually selected' : locationSource === 'gps' ? 'Detected by GPS · Google Maps' : ''}</span>}
           </div>
         </div>
 
@@ -78,8 +78,9 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({ onOpenMobileMenu }) 
           {/* GPS Live Pill */}
           <button
             onClick={toggleGps}
+            disabled={isDetectingLocation}
             className="flex items-center gap-1.5 px-2.5 md:px-3 py-1 md:py-1.5 rounded-full bg-stone-900 border border-stone-700/80 hover:border-emerald-500/50 text-stone-200 text-xs font-semibold shadow-xs transition active:scale-95"
-            title="Toggle GPS Live Location"
+            title={gpsActive ? 'Stop live GPS updates' : 'Start live GPS updates'}
           >
             <span
               className={`w-2 h-2 md:w-2.5 md:h-2.5 rounded-full ${
@@ -87,7 +88,7 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({ onOpenMobileMenu }) 
               }`}
             />
             <span className="text-[11px] md:text-xs font-bold text-stone-200">
-              {t('gpsLive')}
+              {gpsActive ? 'GPS Live' : 'Use GPS'}
             </span>
           </button>
 
@@ -122,27 +123,66 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({ onOpenMobileMenu }) 
               </button>
             </div>
 
-            {/* GPS Live detect button */}
+            {/* One high-accuracy fix for city detection */}
             <button
-              onClick={() => {
-                toggleGps();
-                setShowLocationModal(false);
-              }}
+              disabled={isDetectingLocation}
+              onClick={() => void detectCurrentLocation()}
               className="w-full flex items-center justify-between p-3 rounded-2xl bg-orange-50 dark:bg-orange-950/40 text-orange-700 dark:text-orange-300 font-bold text-xs mb-4 border border-orange-200 dark:border-orange-800 hover:bg-orange-100 transition"
             >
               <div className="flex items-center gap-2">
                 <Navigation className="w-4 h-4 text-orange-600" />
-                <span>Use Current Live GPS</span>
+                <span>{isDetectingLocation ? 'Detecting your location…' : 'Detect Current Location'}</span>
               </div>
               <span className="text-[10px] uppercase bg-orange-600 text-white px-2 py-0.5 rounded-full">
-                Accurate
+                Device GPS
               </span>
             </button>
 
+            <p className="-mt-2 mb-3 text-[10px] leading-relaxed text-stone-500 dark:text-stone-400">
+              Device coordinates are sent to Google Maps to identify your city and locality. ChatMaps keeps the result in this page session only.
+            </p>
+
+            <button
+              onClick={toggleGps}
+              disabled={isDetectingLocation}
+              className="w-full flex items-center justify-between p-3 rounded-2xl bg-stone-50 dark:bg-stone-800 text-stone-700 dark:text-stone-200 font-bold text-xs mb-3 border border-stone-200 dark:border-stone-700"
+            >
+              <span>{gpsActive ? 'Stop live GPS city updates' : 'Keep city updated as I move'}</span>
+              <span className={`w-2 h-2 rounded-full ${gpsActive ? 'bg-emerald-500' : 'bg-stone-400'}`} />
+            </button>
+            {locationSource === 'manual' && <p className="text-[11px] text-stone-500 mb-2">Current city was manually selected.</p>}
+            {locationSource === 'gps' && <p className="text-[11px] text-stone-500 mb-2">City detected from device GPS. Precise coordinates are not saved.</p>}
+            {locationError && <p role="alert" className="text-[11px] text-rose-600 dark:text-rose-300 mb-3">{locationError}{!window.isSecureContext ? ' Location requires HTTPS on this device.' : ''}</p>}
+
+            <div className="flex gap-2 mb-3">
+              <input
+                value={manualCityInput}
+                onChange={event => setManualCityInput(event.target.value)}
+                onKeyDown={event => {
+                  if (event.key === 'Enter' && manualCityInput.trim()) {
+                    setSelectedCity(manualCityInput.trim());
+                    setManualCityInput('');
+                    setShowLocationModal(false);
+                  }
+                }}
+                placeholder="Enter a city manually"
+                className="min-w-0 flex-1 rounded-xl border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-800 px-3 py-2.5 text-xs text-stone-900 dark:text-white"
+              />
+              <button
+                disabled={!manualCityInput.trim()}
+                onClick={() => {
+                  setSelectedCity(manualCityInput.trim());
+                  setManualCityInput('');
+                  setShowLocationModal(false);
+                }}
+                className="rounded-xl bg-orange-600 px-3 py-2 text-xs font-bold text-white disabled:opacity-40"
+              >Use city</button>
+            </div>
+
             {/* City Presets */}
             <div className="space-y-1.5 max-h-60 overflow-y-auto">
-              {INDIAN_FOOD_CITIES.map((city) => {
-                const isSelected = selectedCity.startsWith(city.split(' ')[0]);
+              {MANUAL_CITY_OPTIONS.map((city) => {
+                const isSelected = selectedCity.toLowerCase() === city.toLowerCase() && locationSource === 'manual';
                 return (
                   <button
                     key={city}
@@ -162,6 +202,7 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({ onOpenMobileMenu }) 
                 );
               })}
             </div>
+            {selectedCity && <button onClick={() => { clearSelectedCity(); setShowLocationModal(false); }} className="mt-3 text-xs font-semibold text-stone-500 hover:text-orange-600">Clear city selection</button>}
           </div>
         </div>
       )}

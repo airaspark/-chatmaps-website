@@ -51,7 +51,13 @@ export interface Vendor {
   landmark?: string;
   city: string;
   postalCode?: string;
-  location: VendorLocation;
+  location?: VendorLocation;
+  isOnline?: boolean;
+  locationAvailable?: boolean;
+  gpsAccuracy?: number;
+  lastLocationAt?: string;
+  lastSeenAt?: string;
+  ownerEmail?: string;
   bannerImage: string;
   coverImageUrl?: string;
   photos: string[];
@@ -61,6 +67,7 @@ export interface Vendor {
   closingTime?: string;
   status: VendorApprovalStatus;
   rejectionReason?: string;
+  statusHistory?: Array<{ from: string; to: string; at: string; actorUid: string }>;
   rating: number;
   reviewCount: number;
   priceRange?: '₹' | '₹₹' | '₹₹₹';

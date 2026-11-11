@@ -4,6 +4,8 @@ import { Vendor, FilterOptions } from '../types';
 import { vendorService } from '../services/vendorService';
 import { VendorCard } from '../components/vendor/VendorCard';
 import { FOOD_CATEGORIES } from '../data/initialVendors';
+import { useApp } from '../context/AppContext';
+import { normalizeCityName } from '../data/cities';
 import {
   Search,
   Filter,
@@ -16,11 +18,31 @@ import {
   Compass
 } from 'lucide-react';
 
+const categoryTerms: Record<string, string[]> = {
+  chaat: ['chaat', 'pani puri', 'chat'],
+  'indo-chinese': ['indo chinese', 'chinese', 'gobi'],
+  momos: ['momo'],
+  snacks: ['snack', 'samosa'],
+  'south-indian': ['south indian', 'dosa', 'idli', 'vada'],
+  'mumbai-special': ['mumbai', 'pav bhaji', 'fast food']
+};
+
+const vendorMatchesCategory = (vendor: Vendor, category: string): boolean => {
+  const terms = categoryTerms[category];
+  if (!terms) return vendor.category === category || Boolean(vendor.subCategories?.includes(category));
+  const fields = [vendor.category, ...(vendor.subCategories || []), ...vendor.menu.map(item => item.name)]
+    .map(value => value.toLowerCase());
+  return terms.some(term => fields.some(field => field.includes(term)));
+};
+
 export const Explore: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
+  const { selectedCity, locationSource, customerCoordinates, detectCurrentLocation, locationError } = useApp();
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [loading, setLoading] = useState(true);
-  const [userCoords, setUserCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [vendorLoadError, setVendorLoadError] = useState<string | null>(null);
+  const userCoords = customerCoordinates;
+  const cityFilter = selectedCity || searchParams.get('city') || '';
 
   // Filters state
   const [searchQuery, setSearchQuery] = useState(searchParams.get('q') || '');
@@ -38,6 +60,11 @@ export const Explore: React.FC = () => {
     const unsubscribe = vendorService.subscribeToApprovedVendors((list) => {
       setVendors(list);
       setLoading(false);
+      setVendorLoadError(null);
+    }, error => {
+      setVendors([]);
+      setLoading(false);
+      setVendorLoadError(error.message || 'Vendor listings are unavailable.');
     });
     return () => unsubscribe();
   }, []);
@@ -49,22 +76,6 @@ export const Explore: React.FC = () => {
     const cat = searchParams.get('category');
     if (cat !== null) setSelectedCategory(cat);
   }, [searchParams]);
-
-  // Request one high-accuracy device fix; unavailable GPS must not become a guessed location.
-  useEffect(() => {
-    if ('geolocation' in navigator) {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          setUserCoords({
-            lat: pos.coords.latitude,
-            lng: pos.coords.longitude
-          });
-        },
-        () => setUserCoords(null),
-        { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
-      );
-    }
-  }, []);
 
   // Distance helper
   const getDistanceKm = (vendorLat: number, vendorLng: number) => {
@@ -86,6 +97,11 @@ export const Explore: React.FC = () => {
   const filteredVendors = useMemo(() => {
     return vendors
       .filter((v) => {
+        if (cityFilter) {
+          const sameCity = normalizeCityName(v.city || '') === normalizeCityName(cityFilter);
+          const nearbyGpsVendor = locationSource === 'gps' && userCoords && v.location && getDistanceKm(v.location.lat, v.location.lng) <= 30;
+          if (!sameCity && !nearbyGpsVendor) return false;
+        }
         // Search query
         if (searchQuery.trim()) {
           const q = searchQuery.toLowerCase();
@@ -101,9 +117,7 @@ export const Explore: React.FC = () => {
 
         // Category filter
         if (selectedCategory !== 'all') {
-          if (v.category !== selectedCategory && !v.subCategories?.includes(selectedCategory)) {
-            return false;
-          }
+          if (!vendorMatchesCategory(v, selectedCategory)) return false;
         }
 
         // Open Now filter
@@ -122,7 +136,8 @@ export const Explore: React.FC = () => {
         }
 
         // Distance filter
-        if (selectedDistance !== null && userCoords) {
+        if (selectedDistance !== null) {
+          if (!userCoords || !v.location) return false;
           const dist = getDistanceKm(v.location.lat, v.location.lng);
           if (dist > selectedDistance) {
             return false;
@@ -136,7 +151,7 @@ export const Explore: React.FC = () => {
         if (sortBy === 'reviews') return b.reviewCount - a.reviewCount;
         return (b.viewsCount || 0) - (a.viewsCount || 0);
       });
-  }, [vendors, searchQuery, selectedCategory, openNowOnly, pureVegOnly, selectedRating, selectedDistance, sortBy, userCoords]);
+  }, [vendors, searchQuery, selectedCategory, openNowOnly, pureVegOnly, selectedRating, selectedDistance, sortBy, userCoords, cityFilter, locationSource]);
 
   const handleResetFilters = () => {
     setSearchQuery('');
@@ -146,7 +161,7 @@ export const Explore: React.FC = () => {
     setOpenNowOnly(false);
     setPureVegOnly(false);
     setSortBy('recommended');
-    setSearchParams({});
+    setSearchParams(cityFilter ? { city: cityFilter } : {});
   };
 
   const hasActiveFilters =
@@ -159,14 +174,16 @@ export const Explore: React.FC = () => {
 
   return (
     <div className="flex-1 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full">
+      {vendorLoadError && <div role="alert" className="mb-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">{vendorLoadError}</div>}
+      {locationError && <div role="status" className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">{locationError}</div>}
       {/* Top Header & Search */}
       <div className="mb-6 space-y-4">
         <div>
           <h1 className="text-2xl sm:text-3xl font-extrabold text-stone-900 tracking-tight">
-            Explore Street Food Stalls
+            {cityFilter ? `Explore Street Food in ${cityFilter}` : 'Explore Street Food Stalls'}
           </h1>
           <p className="text-xs sm:text-sm text-stone-500 mt-0.5">
-            Discover {vendors.length} authentic street food vendors across India
+            {cityFilter ? `Showing current online vendors in ${cityFilter}` : `Discover ${vendors.length} current online vendors`}
           </p>
         </div>
 
@@ -267,7 +284,10 @@ export const Explore: React.FC = () => {
           ].map((d) => (
             <button
               key={d.label}
-              onClick={() => setSelectedDistance(d.value)}
+              onClick={() => {
+                if (d.value !== null && !userCoords) void detectCurrentLocation();
+                setSelectedDistance(d.value);
+              }}
               className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition ${
                 selectedDistance === d.value
                   ? 'bg-orange-100 text-orange-800 border-orange-300'
@@ -331,10 +351,10 @@ export const Explore: React.FC = () => {
             <Compass className="w-8 h-8" />
           </div>
           <h3 className="text-lg font-bold text-stone-900 mb-1">
-            No street stalls found
+            {cityFilter ? `No online street stalls found in ${cityFilter}` : 'No street stalls found'}
           </h3>
           <p className="text-xs text-stone-500 mb-6 leading-relaxed">
-            We couldn't find any stalls matching your specific search filters. Try widening the distance or clearing your category filter.
+            {cityFilter ? 'No approved vendors with fresh live locations match this city and your current filters.' : 'We could not find stalls matching your current filters. Try choosing a city or widening the distance.'}
           </p>
           <button
             onClick={handleResetFilters}

@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
-import { locationService } from '../services/locationService';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { GpsCoordinates, locationService } from '../services/locationService';
+import { reverseGeocodeCity } from '../services/cityGeocodingService';
 
 export type Language = 'en' | 'kn';
 export type Theme = 'light' | 'dark';
@@ -19,6 +20,14 @@ interface AppContextType {
   setLanguage: (lang: Language) => void;
   selectedCity: string;
   setSelectedCity: (city: string) => void;
+  selectedState: string | null;
+  selectedLocality: string | null;
+  locationSource: 'unknown' | 'gps' | 'manual' | 'unavailable';
+  locationError: string | null;
+  customerCoordinates: GpsCoordinates | null;
+  isDetectingLocation: boolean;
+  detectCurrentLocation: () => Promise<boolean>;
+  clearSelectedCity: () => void;
   gpsActive: boolean;
   toggleGps: () => void;
   notifications: AppNotification[];
@@ -175,12 +184,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [selectedCity, setSelectedCity] = useState<string>(() => {
     try {
-      return localStorage.getItem('chatmaps_selected_city') || 'Select a city';
+      return (localStorage.getItem('chatmaps_selected_city') || '').replace(/\s*\([^)]*\)\s*$/, '').trim();
     } catch {}
-    return 'Select a city';
+    return '';
   });
 
+  const [selectedState, setSelectedState] = useState<string | null>(null);
+  const [selectedLocality, setSelectedLocality] = useState<string | null>(null);
+  const [locationSource, setLocationSource] = useState<'unknown' | 'gps' | 'manual' | 'unavailable'>(() => {
+    try {
+      const source = localStorage.getItem('chatmaps_location_source');
+      if (source === 'manual' && localStorage.getItem('chatmaps_selected_city')) return 'manual';
+      // A city saved by the old picker was a user selection, not a GPS result.
+      if (!source && localStorage.getItem('chatmaps_selected_city')) return 'manual';
+    } catch {}
+    return 'unknown';
+  });
+  const [locationError, setLocationError] = useState<string | null>(null);
+  const [customerCoordinates, setCustomerCoordinates] = useState<GpsCoordinates | null>(null);
+  const [isDetectingLocation, setIsDetectingLocation] = useState(false);
   const [gpsActive, setGpsActive] = useState<boolean>(false);
+  const gpsTrackingRef = useRef(false);
+  const geocodeInProgressRef = useRef(false);
+  const locationRequestInProgressRef = useRef(false);
+  const lastCityGeocodeRef = useRef<{ coordinates: GpsCoordinates; at: number } | null>(null);
+  const locationSelectionGenerationRef = useRef(0);
   const [notifications, setNotifications] = useState<AppNotification[]>(() => {
     try {
       const saved = localStorage.getItem('chatmaps_notifs');
@@ -215,26 +243,145 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setTheme(prev => prev === 'light' ? 'dark' : 'light');
   };
 
-  // Set city
-  const handleSetCity = (city: string) => {
-    setSelectedCity(city);
+  const handleSetCity = useCallback((city: string) => {
+    const cleanCity = city.trim();
+    if (!cleanCity) return;
+    locationSelectionGenerationRef.current += 1;
+    gpsTrackingRef.current = false;
+    locationService.stopTracking();
+    setGpsActive(false);
+    setSelectedCity(cleanCity);
+    setSelectedState(null);
+    setSelectedLocality(null);
+    setCustomerCoordinates(null);
+    setLocationSource('manual');
+    setLocationError(null);
     try {
-      localStorage.setItem('chatmaps_selected_city', city);
+      localStorage.setItem('chatmaps_selected_city', cleanCity);
+      localStorage.setItem('chatmaps_location_source', 'manual');
     } catch {}
-  };
+  }, []);
 
-  useEffect(() => locationService.subscribe((location) => {
-    setGpsActive(location.status === 'tracking' && location.coords !== null);
-  }), []);
+  const clearSelectedCity = useCallback(() => {
+    locationSelectionGenerationRef.current += 1;
+    gpsTrackingRef.current = false;
+    locationService.stopTracking();
+    setGpsActive(false);
+    setSelectedCity('');
+    setSelectedState(null);
+    setSelectedLocality(null);
+    setCustomerCoordinates(null);
+    setLocationSource('unknown');
+    setLocationError(null);
+    try {
+      localStorage.removeItem('chatmaps_selected_city');
+      localStorage.removeItem('chatmaps_location_source');
+    } catch {}
+  }, []);
 
-  const toggleGps = () => {
-    if (gpsActive) {
+  const applyGpsCity = useCallback(async (coordinates: GpsCoordinates, generation = locationSelectionGenerationRef.current): Promise<boolean> => {
+    if (geocodeInProgressRef.current) return false;
+    geocodeInProgressRef.current = true;
+    try {
+      const address = await reverseGeocodeCity(coordinates);
+      if (generation !== locationSelectionGenerationRef.current) return false;
+      setSelectedCity(address.city);
+      setSelectedState(address.state);
+      setSelectedLocality(address.locality);
+      setLocationSource('gps');
+      setLocationError(null);
+      // Google geocoding content is intentionally kept in memory only.
+      try {
+        localStorage.removeItem('chatmaps_selected_city');
+        localStorage.removeItem('chatmaps_location_source');
+      } catch {}
+      return true;
+    } catch (error) {
+      if (generation === locationSelectionGenerationRef.current) {
+        setLocationError(error instanceof Error ? error.message : 'Could not identify your city. Select it manually.');
+        setLocationSource(current => current === 'manual' ? current : 'unavailable');
+      }
+      return false;
+    } finally {
+      geocodeInProgressRef.current = false;
+    }
+  }, []);
+
+  const detectCurrentLocation = useCallback(async (): Promise<boolean> => {
+    if (locationRequestInProgressRef.current) return false;
+    locationRequestInProgressRef.current = true;
+    setIsDetectingLocation(true);
+    setLocationError(null);
+    const generation = ++locationSelectionGenerationRef.current;
+    try {
+      const fix = await locationService.getCurrentPosition(true);
+      if (!fix.coords || !Number.isFinite(fix.coords.lat) || !Number.isFinite(fix.coords.lng)) {
+        throw new Error('Your device did not return valid coordinates. Select your city manually.');
+      }
+      if (fix.accuracy === null || fix.accuracy > 1000) {
+        throw new Error(`GPS accuracy is too low to identify your city (±${fix.accuracy ?? 'unknown'}m). Try again outdoors or select your city manually.`);
+      }
+      setCustomerCoordinates(fix.coords);
+      lastCityGeocodeRef.current = { coordinates: fix.coords, at: Date.now() };
+      return await applyGpsCity(fix.coords, generation);
+    } catch (error) {
+      setLocationSource(current => current === 'manual' ? current : 'unavailable');
+      setLocationError(error instanceof Error ? error.message : 'Location is unavailable. Select your city manually.');
+      return false;
+    } finally {
+      locationRequestInProgressRef.current = false;
+      setIsDetectingLocation(false);
+    }
+  }, [applyGpsCity]);
+
+  useEffect(() => {
+    return locationService.subscribe((location) => {
+      const tracking = location.status === 'tracking' && location.coords !== null;
+      setGpsActive(tracking);
+      if (location.coords && location.timestamp && Date.now() - location.timestamp < 120_000) {
+        setCustomerCoordinates(location.coords);
+      }
+      if (gpsTrackingRef.current && (location.status === 'denied' || location.status === 'error')) {
+        gpsTrackingRef.current = false;
+        setLocationError(location.errorMessage || 'GPS is unavailable. Select your city manually or try again.');
+      }
+      if (!gpsTrackingRef.current || !tracking || !location.coords) return;
+
+      const previous = lastCityGeocodeRef.current;
+      const movedMeters = previous
+        ? locationService.calculateDistanceMeters(previous.coordinates.lat, previous.coordinates.lng, location.coords.lat, location.coords.lng)
+        : Number.POSITIVE_INFINITY;
+      const waitedLongEnough = !previous || Date.now() - previous.at >= 5 * 60_000;
+      if (movedMeters >= 15_000 && waitedLongEnough) {
+        lastCityGeocodeRef.current = { coordinates: location.coords, at: Date.now() };
+        void applyGpsCity(location.coords);
+      }
+    });
+  }, [applyGpsCity]);
+
+  const toggleGps = useCallback(() => {
+    if (isDetectingLocation) return;
+    if (gpsTrackingRef.current) {
+      gpsTrackingRef.current = false;
       locationService.stopTracking();
       setGpsActive(false);
       return;
     }
+    gpsTrackingRef.current = true;
+    locationSelectionGenerationRef.current += 1;
+    lastCityGeocodeRef.current = null;
+    setLocationError(null);
+    setLocationSource('gps');
+    setSelectedCity('');
+    setSelectedState(null);
+    setSelectedLocality(null);
+    setCustomerCoordinates(null);
+    try {
+      localStorage.removeItem('chatmaps_selected_city');
+      localStorage.removeItem('chatmaps_location_source');
+    } catch {}
     locationService.startTracking();
-  };
+  }, [isDetectingLocation]);
 
   const markNotificationsAsRead = () => {
     const updated = notifications.map(n => ({ ...n, read: true }));
@@ -259,6 +406,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setLanguage,
         selectedCity,
         setSelectedCity: handleSetCity,
+        selectedState,
+        selectedLocality,
+        locationSource,
+        locationError,
+        customerCoordinates,
+        isDetectingLocation,
+        detectCurrentLocation,
+        clearSelectedCity,
         gpsActive,
         toggleGps,
         notifications,

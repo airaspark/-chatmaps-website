@@ -2,7 +2,6 @@ import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { vendorService } from '../../services/vendorService';
-import { LocationPickerMap } from '../../components/map/LocationPickerMap';
 import { FOOD_CATEGORIES } from '../../data/initialVendors';
 import {
   Store,
@@ -30,10 +29,9 @@ export const VendorRegister: React.FC = () => {
   const [category, setCategory] = useState('Chaat & Snacks');
   const [description, setDescription] = useState('');
   const [address, setAddress] = useState('');
-  const [city, setCity] = useState('Bangalore');
-  const [openingHours, setOpeningHours] = useState('4:00 PM - 11:00 PM');
+  const [city, setCity] = useState('');
+  const [openingHours, setOpeningHours] = useState('');
   const [isPureVeg, setIsPureVeg] = useState(true);
-  const [location, setLocation] = useState({ lat: 12.9716, lng: 77.5946 });
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -60,6 +58,7 @@ export const VendorRegister: React.FC = () => {
       // 2. Create vendor record with status: 'pending' (per requirement: unapproved vendors must not appear publicly)
       await vendorService.registerVendorShop({
         ownerUid: user.uid,
+        ownerEmail: email.trim(),
         shopName,
         ownerName,
         description: description || `Authentic ${category} made fresh daily by ${ownerName}.`,
@@ -69,15 +68,10 @@ export const VendorRegister: React.FC = () => {
         whatsapp: phone,
         address,
         city,
-        location,
-        bannerImage: 'https://images.unsplash.com/photo-1668236543090-82eba5ee5976?auto=format&fit=crop&w=1200&q=80',
-        photos: [
-          'https://images.unsplash.com/photo-1668236543090-82eba5ee5976?auto=format&fit=crop&w=800&q=80'
-        ],
-        menu: [
-          { id: 'm-init-1', name: 'Special Item', price: 60, isVeg: isPureVeg, isPopular: true, description: 'Chef specialty made with fresh ingredients' }
-        ],
-        isOpen: true,
+        photos: [],
+        menu: [],
+        bannerImage: '',
+        isOpen: false,
         openingHours,
         isPureVeg,
         priceRange: '₹'
@@ -297,15 +291,6 @@ export const VendorRegister: React.FC = () => {
                 <span>This stall is 100% Pure Vegetarian</span>
               </label>
             </div>
-          </div>
-
-          {/* Map Location Picker */}
-          <div className="pt-2">
-            <LocationPickerMap
-              location={location}
-              onChange={(loc) => setLocation({ lat: loc.lat, lng: loc.lng })}
-              address={address}
-            />
           </div>
 
           <div className="pt-4 space-y-2">

@@ -35,7 +35,7 @@ export const PrivacyPolicy: React.FC = () => {
 
             <div className="text-right text-xs text-stone-500 dark:text-stone-400 font-medium sm:self-end">
               <div>Effective Date: <strong className="text-stone-800 dark:text-stone-200">February 15, 2025</strong></div>
-              <div>Last Updated: <strong className="text-stone-800 dark:text-stone-200">February 15, 2025</strong></div>
+              <div>Last Updated: <strong className="text-stone-800 dark:text-stone-200">November 12, 2026</strong></div>
             </div>
           </div>
 
@@ -155,7 +155,10 @@ export const PrivacyPolicy: React.FC = () => {
                 <strong>High Accuracy Hardware Fix:</strong> When location is enabled, we use high-accuracy GPS positioning (<code className="bg-stone-100 dark:bg-stone-800 px-1 py-0.5 rounded text-xs">enableHighAccuracy: true</code>) to center the Live Map and calculate distances to nearby stalls.
               </li>
               <li>
-                <strong>No Location Sharing:</strong> Your live GPS position is processed locally on your device and is never broadcast or exposed to other customers or third-party advertisers.
+                <strong>Reverse Geocoding:</strong> If you choose device-based city detection, the current latitude and longitude are sent to Google Maps Geocoding so ChatMaps can show a readable city and locality. Precise coordinates and the returned city result are kept in page memory and are not saved by ChatMaps. Google processes the request under its own privacy terms.
+              </li>
+              <li>
+                <strong>Location Use:</strong> Device coordinates used for nearby distance calculations remain in page memory and are not shown to other customers. Live vendor locations are separate and are shared by vendors only while they are online.
               </li>
               <li>
                 <strong>Revocability:</strong> You may revoke location access at any time through your browser or device operating system settings.
@@ -186,7 +189,7 @@ export const PrivacyPolicy: React.FC = () => {
                 </a>.
               </li>
               <li>
-                <strong>Google Maps Platform:</strong> We use the Google Maps JavaScript API with a dedicated Map ID to display roads, locality labels, and custom vendor pins while suppressing commercial business POIs. Your interaction with map components is subject to the{' '}
+                <strong>Google Maps Platform:</strong> We use the Google Maps JavaScript API, Google Maps Geocoding API, and a dedicated Map ID to display map content and derive a city/locality label from a device location only after location permission is granted. Your interaction and location lookup are subject to the{' '}
                 <a
                   href="https://policies.google.com/privacy"
                   target="_blank"

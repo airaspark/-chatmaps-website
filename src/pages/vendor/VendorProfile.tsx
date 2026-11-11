@@ -4,7 +4,6 @@ import { useAuth } from '../../context/AuthContext';
 import { vendorService } from '../../services/vendorService';
 import { storageService } from '../../services/storageService';
 import { Vendor, MenuItem } from '../../types';
-import { LocationPickerMap } from '../../components/map/LocationPickerMap';
 import { FOOD_CATEGORIES } from '../../data/initialVendors';
 import {
   Store,
@@ -47,7 +46,6 @@ export const VendorProfile: React.FC = () => {
   const [openingHours, setOpeningHours] = useState('');
   const [isPureVeg, setIsPureVeg] = useState(true);
   const [priceRange, setPriceRange] = useState<'₹' | '₹₹' | '₹₹₹'>('₹');
-  const [location, setLocation] = useState({ lat: 12.9716, lng: 77.5946 });
 
   // Images state
   const [bannerImage, setBannerImage] = useState('');
@@ -65,11 +63,7 @@ export const VendorProfile: React.FC = () => {
     const fetchVendor = async () => {
       if (!userProfile) return;
       setLoading(true);
-      let v = await vendorService.getVendorByOwnerUid(userProfile.uid);
-      if (!v) {
-        const all = await vendorService.getAllVendorsForAdmin();
-        v = all.find(x => x.ownerUid === userProfile.uid) || all[0];
-      }
+      const v = await vendorService.getVendorByOwnerUid(userProfile.uid);
 
       if (v) {
         setVendor(v);
@@ -86,7 +80,6 @@ export const VendorProfile: React.FC = () => {
         setOpeningHours(v.openingHours);
         setIsPureVeg(v.isPureVeg ?? true);
         setPriceRange(v.priceRange || '₹');
-        setLocation(v.location);
         setBannerImage(v.bannerImage);
         setPhotos(v.photos || []);
         setMenu(v.menu || []);
@@ -94,18 +87,22 @@ export const VendorProfile: React.FC = () => {
       setLoading(false);
     };
 
-    fetchVendor();
+    fetchVendor().catch(error => {
+      console.error('Unable to load vendor profile:', error);
+      setErrorMsg(error instanceof Error ? error.message : 'Unable to load the vendor profile.');
+      setLoading(false);
+    });
   }, [userProfile]);
 
   // Upload shop banner image
   const handleBannerUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !vendor) return;
+    if (!file || !vendor || !userProfile) return;
 
     setUploadingImage(true);
     setErrorMsg('');
     try {
-      const url = await storageService.uploadImage(file, `vendors/${vendor.id}/banner_${Date.now()}.jpg`);
+      const url = await storageService.uploadImage(file, `vendors/${userProfile.uid}/banner_${Date.now()}.jpg`);
       setBannerImage(url);
     } catch (err) {
       setErrorMsg('Image upload failed.');
@@ -117,12 +114,12 @@ export const VendorProfile: React.FC = () => {
   // Upload stall / food gallery photo
   const handleGalleryUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !vendor) return;
+    if (!file || !vendor || !userProfile) return;
 
     setUploadingImage(true);
     setErrorMsg('');
     try {
-      const url = await storageService.uploadImage(file, `vendors/${vendor.id}/food_${Date.now()}.jpg`);
+      const url = await storageService.uploadImage(file, `vendors/${userProfile.uid}/food_${Date.now()}.jpg`);
       setPhotos([...photos, url]);
     } catch (err) {
       setErrorMsg('Image upload failed.');
@@ -185,7 +182,6 @@ export const VendorProfile: React.FC = () => {
         openingHours,
         isPureVeg,
         priceRange,
-        location,
         bannerImage,
         coverImageUrl: bannerImage,
         photos,
@@ -247,7 +243,7 @@ export const VendorProfile: React.FC = () => {
             Edit Stall Details & Menu
           </h1>
           <p className="text-xs text-stone-500 mt-1">
-            Keep your street stall information, location pin, photos, and prices accurate.
+            Keep your stall information, photos, and prices accurate. Your live cart location is captured from device GPS when you go online.
           </p>
         </div>
 
@@ -510,12 +506,6 @@ export const VendorProfile: React.FC = () => {
               </div>
             </div>
 
-            {/* Interactive Map Picker */}
-            <LocationPickerMap
-              location={location}
-              onChange={(loc) => setLocation({ lat: loc.lat, lng: loc.lng })}
-              address={address}
-            />
           </div>
 
           {/* SECTION 4: Menu Items Management */}

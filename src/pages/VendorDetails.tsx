@@ -225,7 +225,7 @@ export const VendorDetails: React.FC = () => {
 
             {/* Quick Action Buttons */}
             <div className="flex flex-wrap items-center gap-3 mt-6 pt-4 border-t border-stone-100">
-              <a
+              {vendor.location && <a
                 href={`https://www.google.com/maps/dir/?api=1&destination=${vendor.location.lat},${vendor.location.lng}`}
                 target="_blank"
                 rel="noreferrer"
@@ -233,7 +233,7 @@ export const VendorDetails: React.FC = () => {
               >
                 <Compass className="w-4 h-4" />
                 <span>Get Directions</span>
-              </a>
+              </a>}
 
               <a
                 href={`tel:${vendor.phone}`}
@@ -482,7 +482,7 @@ export const VendorDetails: React.FC = () => {
 
             {/* Direct Map Route Trigger */}
             <div className="pt-3 border-t border-stone-100">
-              <a
+              {vendor.location && <a
                 href={`https://www.google.com/maps/dir/?api=1&destination=${vendor.location.lat},${vendor.location.lng}`}
                 target="_blank"
                 rel="noreferrer"
@@ -490,7 +490,7 @@ export const VendorDetails: React.FC = () => {
               >
                 <Compass className="w-4 h-4" />
                 <span>Open in Google Maps Navigation</span>
-              </a>
+              </a>}
             </div>
           </div>
         </div>

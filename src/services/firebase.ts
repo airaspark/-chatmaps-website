@@ -26,6 +26,8 @@ export const getFirebaseConfigurationIssue = (): string | null => {
 
 export const isFirebaseConfigured = (): boolean => getFirebaseConfigurationIssue() === null;
 
+export const isFirebaseRealtimeDatabaseConfigured = (): boolean => Boolean(import.meta.env.VITE_FIREBASE_DATABASE_URL);
+
 let app: FirebaseApp | null = null;
 let auth: Auth | null = null;
 let db: Firestore | null = null;

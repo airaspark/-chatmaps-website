@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
+import { adminService } from '../../services/adminService';
 import {
   ShieldAlert,
   Mail,
@@ -13,7 +14,7 @@ import {
 } from 'lucide-react';
 
 export const AdminLogin: React.FC = () => {
-  const { userProfile, role, loginWithEmail, logout } = useAuth();
+  const { currentUser, userProfile, role, loginWithEmail, logout } = useAuth();
   const navigate = useNavigate();
 
   const [email, setEmail] = useState('');
@@ -23,10 +24,14 @@ export const AdminLogin: React.FC = () => {
 
   // If already authenticated with active admin role, redirect to admin dashboard
   useEffect(() => {
-    if (userProfile && (userProfile.role === 'admin' || role === 'admin') && userProfile.status !== 'suspended') {
-      navigate('/admin/dashboard', { replace: true });
-    }
-  }, [userProfile, role, navigate]);
+    if (!currentUser || !userProfile || (userProfile.role !== 'admin' && role !== 'admin') || userProfile.status === 'suspended') return;
+
+    let isCurrent = true;
+    adminService.verifyAdminStatus(currentUser.uid).then(({ isAdmin }) => {
+      if (isCurrent && isAdmin) navigate('/admin/dashboard', { replace: true });
+    });
+    return () => { isCurrent = false; };
+  }, [currentUser?.uid, userProfile, role, navigate]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

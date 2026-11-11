@@ -34,7 +34,7 @@ export const VendorCard: React.FC<VendorCardProps> = ({
 
   // Approximate distance in km using Haversine formula if userCoords available
   const calculateDistance = () => {
-    if (!userCoords) return null;
+    if (!userCoords || !vendor.location) return null;
     const R = 6371; // km
     const dLat = ((vendor.location.lat - userCoords.lat) * Math.PI) / 180;
     const dLon = ((vendor.location.lng - userCoords.lng) * Math.PI) / 180;
@@ -186,7 +186,7 @@ export const VendorCard: React.FC<VendorCardProps> = ({
           </div>
 
           <div className="flex items-center gap-1.5">
-            <a
+            {vendor.location && <a
               href={`https://www.google.com/maps/dir/?api=1&destination=${vendor.location.lat},${vendor.location.lng}`}
               target="_blank"
               rel="noreferrer"
@@ -194,7 +194,7 @@ export const VendorCard: React.FC<VendorCardProps> = ({
               title="Directions"
             >
               <Compass className="w-4 h-4" />
-            </a>
+            </a>}
             <Link
               to={`/vendor/${vendor.id}`}
               className="px-3 py-1.5 rounded-xl bg-orange-600 hover:bg-orange-700 text-white text-xs font-bold shadow-xs transition active:scale-95"

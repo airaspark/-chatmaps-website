@@ -1,219 +1,159 @@
 import { db, isFirebaseConfigured } from './firebase';
 import {
+  addDoc,
   collection,
   doc,
-  getDocs,
   getDoc,
-  setDoc,
-  updateDoc,
+  getDocs,
+  onSnapshot,
   query,
+  updateDoc,
   where,
-  onSnapshot
+  type Unsubscribe
 } from 'firebase/firestore';
-import { Vendor, VendorApprovalStatus } from '../types';
-import { INITIAL_VENDORS } from '../data/initialVendors';
+import { Vendor, VendorApprovalStatus, VendorLocation } from '../types';
 
-// Reactive local storage fallback for immediate out-of-the-box preview and testing
-const LOCAL_STORAGE_KEY = 'chatmaps_vendors_store';
-
-const getLocalVendors = (): Vendor[] => {
-  try {
-    const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch (e) {
-    console.error('Local vendor read error:', e);
-  }
-  localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(INITIAL_VENDORS));
-  return INITIAL_VENDORS;
+const requireDb = () => {
+  if (!isFirebaseConfigured() || !db) throw new Error('Vendor records are unavailable because Firebase is not configured.');
+  return db;
 };
 
-const saveLocalVendors = (vendors: Vendor[]) => {
-  try {
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(vendors));
-    // Dispatch custom event for cross-component reactive sync
-    window.dispatchEvent(new CustomEvent('chatmaps_vendors_updated', { detail: vendors }));
-  } catch (e) {
-    console.error('Local vendor save error:', e);
-  }
+const mapVendor = (id: string, data: Record<string, any>): Vendor => ({ ...data, id } as Vendor);
+const isValidCoordinates = (location?: VendorLocation): location is VendorLocation =>
+  !!location && Number.isFinite(location.lat) && Number.isFinite(location.lng) &&
+  location.lat >= -90 && location.lat <= 90 && location.lng >= -180 && location.lng <= 180;
+
+export const isCurrentOnlineVendor = (vendor: Vendor, now = Date.now()): boolean => {
+  const updatedAt = vendor.lastLocationAt ? Date.parse(vendor.lastLocationAt) : NaN;
+  return vendor.status === 'approved' &&
+    vendor.isOnline === true &&
+    vendor.locationAvailable === true &&
+    isValidCoordinates(vendor.location) &&
+    Number.isFinite(vendor.gpsAccuracy) && (vendor.gpsAccuracy as number) <= 100 &&
+    Number.isFinite(updatedAt) && now - updatedAt >= 0 && now - updatedAt <= 120_000;
 };
 
 export const vendorService = {
-  // Subscribe to all approved vendors for public exploration & live map
-  subscribeToApprovedVendors: (callback: (vendors: Vendor[]) => void): (() => void) => {
-    if (isFirebaseConfigured() && db) {
-      try {
-        const q = query(collection(db, 'vendors'), where('status', '==', 'approved'));
-        const unsubscribe = onSnapshot(q, (snapshot) => {
-          const list: Vendor[] = [];
-          snapshot.forEach((docSnap) => {
-            list.push({ id: docSnap.id, ...docSnap.data() } as Vendor);
-          });
-          callback(list);
-        }, (error) => {
-          console.warn('Firestore vendors subscription error, falling back:', error);
-          callback(getLocalVendors().filter(v => v.status === 'approved'));
-        });
-        return unsubscribe;
-      } catch (err) {
-        console.warn('Firestore subscription failed, using local store:', err);
-      }
+  subscribeToApprovedVendors: (callback: (vendors: Vendor[]) => void, onError?: (error: Error) => void): Unsubscribe => {
+    let firestore;
+    try {
+      firestore = requireDb();
+    } catch (error) {
+      onError?.(error instanceof Error ? error : new Error('Firebase is unavailable.'));
+      return () => undefined;
     }
-
-    // Local reactive fallback
-    const updateHandler = () => {
-      callback(getLocalVendors().filter(v => v.status === 'approved'));
-    };
-    window.addEventListener('chatmaps_vendors_updated', updateHandler);
-    // Initial call
-    callback(getLocalVendors().filter(v => v.status === 'approved'));
-
+    let approved: Vendor[] = [];
+    const publish = () => callback(approved.filter(vendor => isCurrentOnlineVendor(vendor)));
+    const unsubscribeSnapshot = onSnapshot(query(
+      collection(firestore, 'vendors'),
+      where('status', '==', 'approved'),
+      where('isOnline', '==', true),
+      where('locationAvailable', '==', true)
+    ), snapshot => {
+      approved = snapshot.docs.map(item => mapVendor(item.id, item.data()));
+      publish();
+    }, error => {
+      console.error('Public vendor subscription failed:', error);
+      onError?.(error);
+    });
+    const expiryTimer = window.setInterval(publish, 15_000);
     return () => {
-      window.removeEventListener('chatmaps_vendors_updated', updateHandler);
+      unsubscribeSnapshot();
+      window.clearInterval(expiryTimer);
     };
   },
 
-  // Get all vendors (including pending/rejected) for Admin dashboard
   getAllVendorsForAdmin: async (): Promise<Vendor[]> => {
-    if (isFirebaseConfigured() && db) {
-      try {
-        const snapshot = await getDocs(collection(db, 'vendors'));
-        const list: Vendor[] = [];
-        snapshot.forEach((docSnap) => {
-          list.push({ id: docSnap.id, ...docSnap.data() } as Vendor);
-        });
-        if (list.length > 0) return list;
-      } catch (error) {
-        console.warn('Error fetching all vendors from Firestore:', error);
-      }
-    }
-    return getLocalVendors();
+    const snapshot = await getDocs(collection(requireDb(), 'vendors'));
+    return snapshot.docs.map(item => mapVendor(item.id, item.data()));
   },
 
-  // Get vendor by ID
   getVendorById: async (vendorId: string): Promise<Vendor | null> => {
-    if (isFirebaseConfigured() && db) {
-      try {
-        const docRef = doc(db, 'vendors', vendorId);
-        const docSnap = await getDoc(docRef);
-        if (docSnap.exists()) {
-          return { id: docSnap.id, ...docSnap.data() } as Vendor;
-        }
-      } catch (error) {
-        console.warn('Error getting vendor from Firestore:', error);
-      }
-    }
-    const vendors = getLocalVendors();
-    return vendors.find((v) => v.id === vendorId) || null;
+    const snapshot = await getDoc(doc(requireDb(), 'vendors', vendorId));
+    if (!snapshot.exists()) return null;
+    const vendor = mapVendor(snapshot.id, snapshot.data());
+    return isCurrentOnlineVendor(vendor) ? vendor : null;
   },
 
-  // Get vendor by owner UID (for vendor dashboard)
   getVendorByOwnerUid: async (ownerUid: string): Promise<Vendor | null> => {
-    if (isFirebaseConfigured() && db) {
-      try {
-        const q = query(collection(db, 'vendors'), where('ownerUid', '==', ownerUid));
-        const snapshot = await getDocs(q);
-        if (!snapshot.empty) {
-          const docSnap = snapshot.docs[0];
-          return { id: docSnap.id, ...docSnap.data() } as Vendor;
-        }
-      } catch (error) {
-        console.warn('Error getting vendor by ownerUid:', error);
-      }
-    }
-    const vendors = getLocalVendors();
-    return vendors.find((v) => v.ownerUid === ownerUid) || null;
+    const snapshot = await getDocs(query(collection(requireDb(), 'vendors'), where('ownerUid', '==', ownerUid)));
+    return snapshot.empty ? null : mapVendor(snapshot.docs[0].id, snapshot.docs[0].data());
   },
 
-  // Live Open/Closed toggle (Vendor feature: immediately reflected to customer exploration)
-  toggleOpenStatus: async (vendorId: string, isOpen: boolean): Promise<boolean> => {
-    if (isFirebaseConfigured() && db) {
-      try {
-        const docRef = doc(db, 'vendors', vendorId);
-        await updateDoc(docRef, {
-          isOpen,
-          updatedAt: new Date().toISOString()
-        });
-      } catch (error) {
-        console.warn('Error toggling open status in Firestore:', error);
-      }
-    }
-
-    // Always update local store so preview instantly updates
-    const vendors = getLocalVendors();
-    const updated = vendors.map(v => v.id === vendorId ? { ...v, isOpen, updatedAt: new Date().toISOString() } : v);
-    saveLocalVendors(updated);
-    return true;
-  },
-
-  // Vendor Registration / Creation (Starts in 'pending' status)
   registerVendorShop: async (vendorData: Omit<Vendor, 'id' | 'createdAt' | 'updatedAt' | 'rating' | 'reviewCount' | 'status'>): Promise<Vendor> => {
-    const id = 'vendor-' + Date.now();
-    const newVendor: Vendor = {
+    const firestore = requireDb();
+    const existing = await getDocs(query(collection(firestore, 'vendors'), where('ownerUid', '==', vendorData.ownerUid)));
+    if (!existing.empty) return mapVendor(existing.docs[0].id, existing.docs[0].data());
+
+    const now = new Date().toISOString();
+    const record = {
       ...vendorData,
-      id,
-      status: 'pending', // Unapproved vendors must not appear publicly until admin approved
-      rating: 5.0,
+      status: 'pending' as VendorApprovalStatus,
+      isOnline: false,
+      locationAvailable: false,
+      isOpen: false,
+      rating: 0,
       reviewCount: 0,
-      isOpen: true,
-      viewsCount: 1,
+      viewsCount: 0,
       favoritesCount: 0,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      createdAt: now,
+      updatedAt: now
     };
-
-    if (isFirebaseConfigured() && db) {
-      try {
-        await setDoc(doc(db, 'vendors', id), newVendor);
-      } catch (error) {
-        console.warn('Error creating vendor in Firestore:', error);
-      }
-    }
-
-    const vendors = getLocalVendors();
-    vendors.push(newVendor);
-    saveLocalVendors(vendors);
-    return newVendor;
+    const created = await addDoc(collection(firestore, 'vendors'), record);
+    return { ...record, id: created.id };
   },
 
-  // Update vendor profile, photos, menu
-  updateVendorShop: async (vendorId: string, updates: Partial<Vendor>): Promise<boolean> => {
-    const payload = {
-      ...updates,
+  updateVendorShop: async (vendorId: string, updates: Partial<Vendor>): Promise<void> => {
+    const { id: _id, ownerUid: _ownerUid, status: _status, isOnline: _isOnline,
+      locationAvailable: _locationAvailable, location: _location, gpsAccuracy: _accuracy,
+      lastLocationAt: _lastLocationAt, ...permittedUpdates } = updates;
+    await updateDoc(doc(requireDb(), 'vendors', vendorId), {
+      ...permittedUpdates,
       updatedAt: new Date().toISOString()
-    };
-
-    if (isFirebaseConfigured() && db) {
-      try {
-        const docRef = doc(db, 'vendors', vendorId);
-        await updateDoc(docRef, payload);
-      } catch (error) {
-        console.warn('Error updating vendor shop in Firestore:', error);
-      }
-    }
-
-    const vendors = getLocalVendors();
-    const nextVendors = vendors.map(v => v.id === vendorId ? { ...v, ...payload } : v);
-    saveLocalVendors(nextVendors);
-    return true;
+    });
   },
 
-  // Admin: Update approval status ('approved' | 'rejected' | 'pending')
-  updateVendorApprovalStatus: async (vendorId: string, status: VendorApprovalStatus): Promise<boolean> => {
-    if (isFirebaseConfigured() && db) {
-      try {
-        const docRef = doc(db, 'vendors', vendorId);
-        await updateDoc(docRef, {
-          status,
-          updatedAt: new Date().toISOString()
-        });
-      } catch (error) {
-        console.warn('Error updating approval status in Firestore:', error);
-      }
-    }
+  toggleOpenStatus: async (vendorId: string, isOpen: boolean): Promise<void> => {
+    await updateDoc(doc(requireDb(), 'vendors', vendorId), {
+      isOpen,
+      updatedAt: new Date().toISOString()
+    });
+  },
 
-    const vendors = getLocalVendors();
-    const nextVendors = vendors.map(v => v.id === vendorId ? { ...v, status, updatedAt: new Date().toISOString() } : v);
-    saveLocalVendors(nextVendors);
-    return true;
+  setVendorOnlineLocation: async (vendorId: string, ownerUid: string, location: VendorLocation, accuracy: number): Promise<void> => {
+    if (!isValidCoordinates(location) || !Number.isFinite(accuracy) || accuracy < 0 || accuracy > 100) {
+      throw new Error('A valid device location with accuracy of 100 metres or better is required to go online.');
+    }
+    const vendorRef = doc(requireDb(), 'vendors', vendorId);
+    const snapshot = await getDoc(vendorRef);
+    if (!snapshot.exists()) throw new Error('Vendor application was not found.');
+    const vendor = snapshot.data();
+    if (vendor.ownerUid !== ownerUid) throw new Error('This vendor record does not belong to the signed-in account.');
+    if (vendor.status !== 'approved') throw new Error('Only approved vendors can go online.');
+
+    const now = new Date().toISOString();
+    await updateDoc(vendorRef, {
+      location: { lat: location.lat, lng: location.lng },
+      gpsAccuracy: Math.round(accuracy),
+      locationAvailable: true,
+      isOnline: true,
+      lastLocationAt: now,
+      lastSeenAt: now,
+      updatedAt: now
+    });
+  },
+
+  setVendorOffline: async (vendorId: string, ownerUid: string): Promise<void> => {
+    const vendorRef = doc(requireDb(), 'vendors', vendorId);
+    const snapshot = await getDoc(vendorRef);
+    if (!snapshot.exists()) throw new Error('Vendor application was not found.');
+    if (snapshot.data().ownerUid !== ownerUid) throw new Error('This vendor record does not belong to the signed-in account.');
+    const now = new Date().toISOString();
+    await updateDoc(vendorRef, {
+      isOnline: false,
+      locationAvailable: false,
+      lastSeenAt: now,
+      updatedAt: now
+    });
   }
 };

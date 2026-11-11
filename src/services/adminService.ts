@@ -1,20 +1,43 @@
 import { db, isFirebaseConfigured } from './firebase';
 import {
   collection,
+  arrayUnion,
+  deleteField,
   doc,
-  getDocs,
   getDoc,
-  setDoc,
-  updateDoc,
-  deleteDoc,
+  getDocs,
+  onSnapshot,
   query,
+  updateDoc,
   where,
-  orderBy,
-  serverTimestamp,
-  deleteField
+  type Unsubscribe
 } from 'firebase/firestore';
 import { Vendor, UserProfile, VendorApprovalStatus } from '../types';
-import { INITIAL_VENDORS } from '../data/initialVendors';
+import { auth } from './firebase';
+
+const requireDb = () => {
+  if (!isFirebaseConfigured() || !db) {
+    throw new Error('Admin data is unavailable because Firebase is not configured. No local demo records are shown.');
+  }
+  return db;
+};
+
+const mapVendor = (id: string, data: Record<string, any>): Vendor => ({ ...data, id } as Vendor);
+const mapUser = (id: string, data: Record<string, any>): UserProfile => ({ ...data, uid: data.uid || id } as UserProfile);
+
+export const LIVE_LOCATION_MAX_AGE_MS = 120_000;
+export const LIVE_LOCATION_MAX_ACCURACY_METERS = 100;
+
+export const isVendorLocationCurrent = (vendor: Vendor, now = Date.now()): boolean => {
+  const updatedAt = vendor.lastLocationAt ? Date.parse(vendor.lastLocationAt) : NaN;
+  return vendor.status === 'approved' && vendor.isOnline === true &&
+    vendor.locationAvailable === true &&
+    Number.isFinite(vendor.location?.lat) &&
+    Number.isFinite(vendor.location?.lng) &&
+    Number.isFinite(vendor.gpsAccuracy) &&
+    (vendor.gpsAccuracy as number) <= LIVE_LOCATION_MAX_ACCURACY_METERS &&
+    Number.isFinite(updatedAt) && now - updatedAt >= 0 && now - updatedAt <= LIVE_LOCATION_MAX_AGE_MS;
+};
 
 export interface AdminStats {
   totalCustomers: number;
@@ -27,394 +50,198 @@ export interface AdminStats {
   closedStalls: number;
 }
 
-const LOCAL_VENDORS_KEY = 'chatmaps_vendors_store';
-const LOCAL_USERS_KEY = 'chatmaps_mock_users_store';
-const LOCAL_ADMINS_KEY = 'chatmaps_authorized_admins_store';
-
-// Helper to get local mock users if running in local preview mode
-const getLocalUsers = (): UserProfile[] => {
-  try {
-    const raw = localStorage.getItem(LOCAL_USERS_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch {}
-
-  const defaultMockUsers: UserProfile[] = [
-    {
-      uid: 'cust-1',
-      email: 'suri@chatmaps.in',
-      displayName: 'Suri Gowda',
-      role: 'customer',
-      phone: '+91 98450 11223',
-      city: 'Mysuru',
-      dietaryPreference: 'all',
-      createdAt: '2026-03-01T10:00:00.000Z'
-    },
-    {
-      uid: 'cust-2',
-      email: 'ananya.rao@gmail.com',
-      displayName: 'Ananya Rao',
-      role: 'customer',
-      phone: '+91 99001 22334',
-      city: 'Bengaluru',
-      dietaryPreference: 'veg',
-      createdAt: '2026-03-05T14:30:00.000Z'
-    },
-    {
-      uid: 'cust-3',
-      email: 'karthik.bhat@outlook.com',
-      displayName: 'Karthik Bhat',
-      role: 'customer',
-      phone: '+91 98860 33445',
-      city: 'Bangalore',
-      dietaryPreference: 'jain',
-      createdAt: '2026-03-08T09:15:00.000Z'
-    },
-    {
-      uid: 'cust-4',
-      email: 'priya.sharma@yahoo.co.in',
-      displayName: 'Priya Sharma',
-      role: 'customer',
-      phone: '+91 97400 44556',
-      city: 'Mumbai',
-      dietaryPreference: 'all',
-      createdAt: '2026-03-12T16:45:00.000Z'
-    }
-  ];
-
-  try {
-    localStorage.setItem(LOCAL_USERS_KEY, JSON.stringify(defaultMockUsers));
-  } catch {}
-  return defaultMockUsers;
-};
-
-const saveLocalUsers = (users: UserProfile[]) => {
-  try {
-    localStorage.setItem(LOCAL_USERS_KEY, JSON.stringify(users));
-  } catch {}
-};
-
-const getLocalVendors = (): Vendor[] => {
-  try {
-    const raw = localStorage.getItem(LOCAL_VENDORS_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch {}
-  return INITIAL_VENDORS;
-};
-
-const saveLocalVendors = (vendors: Vendor[]) => {
-  try {
-    localStorage.setItem(LOCAL_VENDORS_KEY, JSON.stringify(vendors));
-    window.dispatchEvent(new CustomEvent('chatmaps_vendors_updated', { detail: vendors }));
-  } catch {}
-};
+export interface CustomerActivity {
+  reviewCount: number;
+  recentReviews: Array<{ id: string; vendorId?: string; rating?: number; comment?: string; createdAt?: string }>;
+}
 
 export const adminService = {
-  /**
-   * Verify if a user UID is an authorized active administrator
-   * Checks both `admins/{uid}` and `users/{uid}` collections in Firestore.
-   */
-  verifyAdminStatus: async (uid: string, email?: string): Promise<{ isAdmin: boolean; reason?: string }> => {
-    if (isFirebaseConfigured() && db) {
-      try {
-        // 1. Check `admins/{uid}`
-        const adminDoc = await getDoc(doc(db, 'admins', uid));
-        if (adminDoc.exists()) {
-          const data = adminDoc.data();
-          if (data.status === 'suspended') {
-            return { isAdmin: false, reason: 'Administrator account is suspended.' };
-          }
-          if (data.role === 'admin' || data.status === 'active') {
-            return { isAdmin: true };
-          }
-        }
-
-        // 2. Check `users/{uid}`
-        const userDoc = await getDoc(doc(db, 'users', uid));
-        if (userDoc.exists()) {
-          const userData = userDoc.data();
-          if (userData.role === 'admin') {
-            if (userData.status === 'suspended') {
-              return { isAdmin: false, reason: 'Administrator account is suspended.' };
-            }
-            return { isAdmin: true };
-          }
-        }
-      } catch (err: any) {
-        console.warn('Error verifying admin status in Firestore:', err);
+  verifyAdminStatus: async (uid: string): Promise<{ isAdmin: boolean; reason?: string }> => {
+    const firestore = requireDb();
+    try {
+      const adminDoc = await getDoc(doc(firestore, 'admins', uid));
+      if (adminDoc.exists()) {
+        const data = adminDoc.data();
+        if (data.status === 'suspended') return { isAdmin: false, reason: 'Administrator account is suspended.' };
+        if (data.role === 'admin' && data.status === 'active') return { isAdmin: true };
       }
-    }
 
-    // Local / Offline fallback verification
-    if (email && (email.toLowerCase().includes('admin') || email === 'admin@chatmaps.in')) {
-      return { isAdmin: true };
+      const userDoc = await getDoc(doc(firestore, 'users', uid));
+      if (userDoc.exists()) {
+        const data = userDoc.data();
+        if (data.role === 'admin' && data.status === 'active') return { isAdmin: true };
+      }
+    } catch (error) {
+      console.error('Unable to verify administrator status from Firestore:', error);
+      return { isAdmin: false, reason: 'Administrator access could not be verified. Check Firestore access and try again.' };
     }
-
-    return { isAdmin: false, reason: 'Access Denied: You do not have active administrator privileges on ChatMaps.' };
+    return { isAdmin: false, reason: 'Access denied: no active administrator record was found.' };
   },
 
-  /**
-   * Fetch all real-time stats for the Admin Overview cards
-   */
-  getStats: async (): Promise<AdminStats> => {
-    let vendors: Vendor[] = [];
-    let customersCount = 0;
-
-    if (isFirebaseConfigured() && db) {
-      try {
-        const vSnap = await getDocs(collection(db, 'vendors'));
-        vendors = vSnap.docs.map(d => ({ id: d.id, ...d.data() } as Vendor));
-
-        const uSnap = await getDocs(collection(db, 'users'));
-        customersCount = uSnap.docs.filter(d => {
-          const data = d.data();
-          return data.role === 'customer' || !data.role;
-        }).length;
-      } catch (err) {
-        console.warn('Error getting stats from Firestore, using local store:', err);
-        vendors = getLocalVendors();
-        customersCount = getLocalUsers().length;
-      }
-    } else {
-      vendors = getLocalVendors();
-      customersCount = getLocalUsers().length;
-    }
-
-    const pendingApprovals = vendors.filter(v => v.status === 'pending').length;
-    const approvedVendors = vendors.filter(v => v.status === 'approved').length;
-    const rejectedVendors = vendors.filter(v => v.status === 'rejected').length;
-    const suspendedVendors = vendors.filter(v => v.status === 'suspended').length;
-    const activeStalls = vendors.filter(v => v.status === 'approved' && v.isOpen).length;
-    const closedStalls = vendors.filter(v => v.status === 'approved' && !v.isOpen).length;
-
-    return {
-      totalCustomers: customersCount,
-      totalVendors: vendors.length,
-      pendingApprovals,
-      approvedVendors,
-      rejectedVendors,
-      suspendedVendors,
-      activeStalls,
-      closedStalls
-    };
-  },
-
-  /**
-   * Get all vendors across all statuses (pending, approved, rejected, suspended)
-   */
   getAllVendors: async (): Promise<Vendor[]> => {
-    if (isFirebaseConfigured() && db) {
-      try {
-        const snapshot = await getDocs(collection(db, 'vendors'));
-        const list: Vendor[] = [];
-        snapshot.forEach((docSnap) => {
-          list.push({ id: docSnap.id, ...docSnap.data() } as Vendor);
-        });
-        if (list.length > 0) return list;
-      } catch (err) {
-        console.warn('Error fetching all vendors from Firestore:', err);
-      }
-    }
-    return getLocalVendors();
+    const snapshot = await getDocs(collection(requireDb(), 'vendors'));
+    return snapshot.docs.map(item => mapVendor(item.id, item.data()));
   },
 
-  /**
-   * Approve a vendor application
-   */
-  approveVendor: async (vendorId: string): Promise<boolean> => {
-    const updatedAt = new Date().toISOString();
-
-    if (isFirebaseConfigured() && db) {
-      try {
-        await updateDoc(doc(db, 'vendors', vendorId), {
-          status: 'approved',
-          rejectionReason: deleteField(),
-          updatedAt
-        });
-      } catch (err) {
-        console.warn('Firestore vendor approve error:', err);
-      }
-    }
-
-    const vendors = getLocalVendors();
-    const next = vendors.map(v => v.id === vendorId ? { ...v, status: 'approved' as VendorApprovalStatus, rejectionReason: undefined, updatedAt } : v);
-    saveLocalVendors(next);
-    return true;
-  },
-
-  /**
-   * Reject a vendor application with a specific reason
-   */
-  rejectVendor: async (vendorId: string, reason: string): Promise<boolean> => {
-    const updatedAt = new Date().toISOString();
-
-    if (isFirebaseConfigured() && db) {
-      try {
-        await updateDoc(doc(db, 'vendors', vendorId), {
-          status: 'rejected',
-          rejectionReason: reason,
-          updatedAt
-        });
-      } catch (err) {
-        console.warn('Firestore vendor reject error:', err);
-      }
-    }
-
-    const vendors = getLocalVendors();
-    const next = vendors.map(v => v.id === vendorId ? { ...v, status: 'rejected' as VendorApprovalStatus, rejectionReason: reason, updatedAt } : v);
-    saveLocalVendors(next);
-    return true;
-  },
-
-  /**
-   * Suspend or reactivate a vendor
-   */
-  toggleVendorSuspension: async (vendorId: string, currentStatus: string): Promise<boolean> => {
-    const nextStatus: VendorApprovalStatus = currentStatus === 'suspended' ? 'approved' : 'suspended';
-    const updatedAt = new Date().toISOString();
-
-    if (isFirebaseConfigured() && db) {
-      try {
-        await updateDoc(doc(db, 'vendors', vendorId), {
-          status: nextStatus,
-          updatedAt
-        });
-      } catch (err) {
-        console.warn('Firestore vendor suspension toggle error:', err);
-      }
-    }
-
-    const vendors = getLocalVendors();
-    const next = vendors.map(v => v.id === vendorId ? { ...v, status: nextStatus, updatedAt } : v);
-    saveLocalVendors(next);
-    return true;
-  },
-
-  /**
-   * Change stall live availability (Open / Closed toggle)
-   */
-  updateStallAvailability: async (vendorId: string, isOpen: boolean): Promise<boolean> => {
-    const updatedAt = new Date().toISOString();
-
-    if (isFirebaseConfigured() && db) {
-      try {
-        await updateDoc(doc(db, 'vendors', vendorId), {
-          isOpen,
-          updatedAt
-        });
-      } catch (err) {
-        console.warn('Firestore stall availability update error:', err);
-      }
-    }
-
-    const vendors = getLocalVendors();
-    const next = vendors.map(v => v.id === vendorId ? { ...v, isOpen, updatedAt } : v);
-    saveLocalVendors(next);
-    return true;
-  },
-
-  /**
-   * Edit stall details (Admin modification)
-   */
-  editStallDetails: async (vendorId: string, updates: Partial<Vendor>): Promise<boolean> => {
-    const updatedAt = new Date().toISOString();
-    const payload = {
-      ...updates,
-      updatedAt
-    };
-
-    if (isFirebaseConfigured() && db) {
-      try {
-        await updateDoc(doc(db, 'vendors', vendorId), payload);
-      } catch (err) {
-        console.warn('Firestore edit stall details error:', err);
-      }
-    }
-
-    const vendors = getLocalVendors();
-    const next = vendors.map(v => v.id === vendorId ? { ...v, ...payload } : v);
-    saveLocalVendors(next);
-    return true;
-  },
-
-  /**
-   * Remove inappropriate or duplicate stall listing
-   */
-  deleteStall: async (vendorId: string): Promise<boolean> => {
-    if (isFirebaseConfigured() && db) {
-      try {
-        await deleteDoc(doc(db, 'vendors', vendorId));
-      } catch (err) {
-        console.warn('Firestore delete stall error:', err);
-      }
-    }
-
-    const vendors = getLocalVendors();
-    const next = vendors.filter(v => v.id !== vendorId);
-    saveLocalVendors(next);
-    return true;
-  },
-
-  /**
-   * Get all registered customers
-   */
   getAllCustomers: async (): Promise<UserProfile[]> => {
-    if (isFirebaseConfigured() && db) {
-      try {
-        const snapshot = await getDocs(collection(db, 'users'));
-        const list: UserProfile[] = [];
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data() as UserProfile;
-          if (data.role === 'customer' || !data.role) {
-            list.push({ ...data, uid: data.uid || docSnap.id });
-          }
-        });
-        if (list.length > 0) return list;
-      } catch (err) {
-        console.warn('Firestore fetch customers error:', err);
-      }
-    }
-    return getLocalUsers();
+    const snapshot = await getDocs(query(collection(requireDb(), 'users'), where('role', '==', 'customer')));
+    return snapshot.docs.map(item => mapUser(item.id, item.data()));
   },
 
-  /**
-   * Suspend or reactivate a customer account
-   */
-  toggleCustomerSuspension: async (uid: string, currentStatus?: string): Promise<boolean> => {
-    const nextStatus = currentStatus === 'suspended' ? 'active' : 'suspended';
-    const updatedAt = new Date().toISOString();
-
-    if (isFirebaseConfigured() && db) {
-      try {
-        await updateDoc(doc(db, 'users', uid), {
-          status: nextStatus,
-          updatedAt
-        });
-      } catch (err) {
-        console.warn('Firestore customer suspension toggle error:', err);
-      }
-    }
-
-    const users = getLocalUsers();
-    const next = users.map(u => u.uid === uid ? { ...u, status: nextStatus as any, updatedAt } : u);
-    saveLocalUsers(next);
-    return true;
+  getVendorOwnerProfiles: async (): Promise<UserProfile[]> => {
+    const snapshot = await getDocs(query(collection(requireDb(), 'users'), where('role', '==', 'vendor')));
+    return snapshot.docs.map(item => mapUser(item.id, item.data()));
   },
 
-  /**
-   * Delete a customer account (Admin action)
-   */
-  deleteCustomer: async (uid: string): Promise<boolean> => {
-    if (isFirebaseConfigured() && db) {
-      try {
-        await deleteDoc(doc(db, 'users', uid));
-      } catch (err) {
-        console.warn('Firestore delete customer error:', err);
-      }
-    }
+  subscribeToData: (onData: (vendors: Vendor[], customers: UserProfile[], vendorOwners: UserProfile[]) => void, onError: (error: Error) => void): Unsubscribe => {
+    const firestore = requireDb();
+    let vendors: Vendor[] | null = null;
+    let users: UserProfile[] | null = null;
+    const emit = () => {
+      if (vendors && users) onData(vendors, users.filter(user => user.role === 'customer'), users.filter(user => user.role === 'vendor'));
+    };
+    const unsubscribeVendors = onSnapshot(collection(firestore, 'vendors'), snapshot => {
+      vendors = snapshot.docs.map(item => mapVendor(item.id, item.data()));
+      emit();
+    }, error => onError(error));
+    const unsubscribeCustomers = onSnapshot(collection(firestore, 'users'), snapshot => {
+      users = snapshot.docs.map(item => mapUser(item.id, item.data()));
+      emit();
+    }, error => onError(error));
+    return () => {
+      unsubscribeVendors();
+      unsubscribeCustomers();
+    };
+  },
 
-    const users = getLocalUsers();
-    const next = users.filter(u => u.uid !== uid);
-    saveLocalUsers(next);
-    return true;
+  getStats: (vendors: Vendor[], customers: UserProfile[]): AdminStats => {
+    const approved = vendors.filter(v => v.status === 'approved');
+    const online = approved.filter(v => isVendorLocationCurrent(v));
+    return {
+      totalCustomers: customers.length,
+      totalVendors: vendors.length,
+      pendingApprovals: vendors.filter(v => v.status === 'pending').length,
+      approvedVendors: approved.length,
+      rejectedVendors: vendors.filter(v => v.status === 'rejected').length,
+      suspendedVendors: vendors.filter(v => v.status === 'suspended').length,
+      activeStalls: online.length,
+      closedStalls: Math.max(0, approved.length - online.length)
+    };
+  },
+
+  approveVendor: async (vendorId: string): Promise<void> => {
+    const vendorRef = doc(requireDb(), 'vendors', vendorId);
+    const current = await getDoc(vendorRef);
+    if (!current.exists()) throw new Error('Vendor application was not found.');
+    if (current.data().status !== 'pending') throw new Error('Only pending applications can be approved. Refresh the list and try again.');
+    const at = new Date().toISOString();
+    await updateDoc(vendorRef, {
+      status: 'approved',
+      statusHistory: arrayUnion({ from: 'pending', to: 'approved', at, actorUid: auth?.currentUser?.uid || '' }),
+      isOnline: false,
+      locationAvailable: false,
+      rejectionReason: deleteField(),
+      updatedAt: new Date().toISOString()
+    });
+  },
+
+  rejectVendor: async (vendorId: string, reason: string): Promise<void> => {
+    if (!reason.trim()) throw new Error('A rejection reason is required.');
+    const vendorRef = doc(requireDb(), 'vendors', vendorId);
+    const current = await getDoc(vendorRef);
+    if (!current.exists()) throw new Error('Vendor application was not found.');
+    if (current.data().status !== 'pending') throw new Error('Only pending applications can be rejected. Refresh the list and try again.');
+    const at = new Date().toISOString();
+    await updateDoc(vendorRef, {
+      status: 'rejected',
+      statusHistory: arrayUnion({ from: 'pending', to: 'rejected', at, actorUid: auth?.currentUser?.uid || '' }),
+      isOnline: false,
+      locationAvailable: false,
+      rejectionReason: reason.trim(),
+      updatedAt: new Date().toISOString()
+    });
+  },
+
+  setVendorStatus: async (vendorId: string, status: VendorApprovalStatus): Promise<void> => {
+    if (!['pending', 'approved', 'rejected', 'suspended'].includes(status)) throw new Error('Invalid vendor status.');
+    const vendorRef = doc(requireDb(), 'vendors', vendorId);
+    const current = await getDoc(vendorRef);
+    if (!current.exists()) throw new Error('Vendor record was not found.');
+    const previousStatus = String(current.data().status || 'unknown');
+    const at = new Date().toISOString();
+    await updateDoc(vendorRef, {
+      status,
+      statusHistory: arrayUnion({ from: previousStatus, to: status, at, actorUid: auth?.currentUser?.uid || '' }),
+      isOnline: false,
+      locationAvailable: false,
+      updatedAt: new Date().toISOString()
+    });
+  },
+
+  toggleVendorSuspension: async (vendorId: string, currentStatus: string): Promise<void> => {
+    const vendorSnap = await getDoc(doc(requireDb(), 'vendors', vendorId));
+    if (!vendorSnap.exists()) throw new Error('Vendor record no longer exists.');
+    const vendor = vendorSnap.data();
+    if (currentStatus === 'suspended') {
+      if (vendor.status !== 'suspended') throw new Error('Vendor status changed. Refresh the list and retry.');
+      const previousStatus = ['pending', 'approved', 'rejected'].includes(vendor.preSuspensionStatus)
+        ? vendor.preSuspensionStatus as VendorApprovalStatus
+        : 'approved';
+      await adminService.setVendorStatus(vendorId, previousStatus);
+    } else {
+      const at = new Date().toISOString();
+      await updateDoc(doc(requireDb(), 'vendors', vendorId), {
+        status: 'suspended',
+        statusHistory: arrayUnion({ from: String(vendor.status), to: 'suspended', at, actorUid: auth?.currentUser?.uid || '' }),
+        preSuspensionStatus: vendor.status,
+        isOnline: false,
+        locationAvailable: false,
+        updatedAt: new Date().toISOString()
+      });
+    }
+  },
+
+  editStallDetails: async (vendorId: string, updates: Partial<Pick<Vendor, 'shopName' | 'ownerName' | 'phone' | 'category' | 'address' | 'city' | 'description' | 'priceRange' | 'openingHours'>>): Promise<void> => {
+    const payload = Object.fromEntries(Object.entries(updates).map(([key, value]) => [key, typeof value === 'string' ? value.trim() : value]));
+    if (Object.values(payload).some(value => !value)) throw new Error('Complete all required vendor details before saving.');
+    await updateDoc(doc(requireDb(), 'vendors', vendorId), { ...payload, updatedAt: new Date().toISOString() });
+  },
+
+  updateStallAvailability: async (vendorId: string, isOpen: boolean): Promise<void> => {
+    await updateDoc(doc(requireDb(), 'vendors', vendorId), { isOpen, updatedAt: new Date().toISOString() });
+  },
+
+  updateCustomerStatus: async (uid: string, status: 'active' | 'suspended'): Promise<void> => {
+    const userRef = doc(requireDb(), 'users', uid);
+    const userSnap = await getDoc(userRef);
+    if (!userSnap.exists() || userSnap.data().role !== 'customer') throw new Error('Customer record no longer exists.');
+    await updateDoc(userRef, { status, updatedAt: new Date().toISOString() });
+  },
+
+  updateCustomerProfile: async (uid: string, updates: Pick<UserProfile, 'displayName' | 'phone' | 'city'>): Promise<void> => {
+    const displayName = updates.displayName.trim();
+    if (!displayName) throw new Error('Customer name is required.');
+    const userRef = doc(requireDb(), 'users', uid);
+    const userSnap = await getDoc(userRef);
+    if (!userSnap.exists() || userSnap.data().role !== 'customer') throw new Error('Customer record no longer exists.');
+    await updateDoc(userRef, {
+      displayName,
+      phone: updates.phone?.trim() || deleteField(),
+      city: updates.city?.trim() || deleteField(),
+      updatedAt: new Date().toISOString()
+    });
+  },
+
+  getCustomerActivity: async (uid: string): Promise<CustomerActivity> => {
+    const snapshot = await getDocs(query(collection(requireDb(), 'reviews'), where('userId', '==', uid)));
+    const reviews = snapshot.docs.map(item => ({
+      id: item.id,
+      vendorId: item.data().vendorId as string | undefined,
+      rating: item.data().rating as number | undefined,
+      comment: item.data().comment as string | undefined,
+      createdAt: item.data().createdAt as string | undefined
+    }))
+      .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+    return { reviewCount: reviews.length, recentReviews: reviews.slice(0, 5) };
   }
 };

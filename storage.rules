@@ -15,9 +15,11 @@ service firebase.storage {
     }
 
     // Public read for all shop and food photos
-    match /vendors/{vendorId}/{allPaths=**} {
+    // Vendor uploads are isolated to the signed-in account's UID namespace.
+    // Firestore vendor document IDs are deliberately not accepted as upload paths.
+    match /vendors/{ownerUid}/{allPaths=**} {
       allow read: if true;
-      allow write: if isAuthenticated() && isImage() && isWithinSizeLimit();
+      allow write: if isAuthenticated() && request.auth.uid == ownerUid && isImage() && isWithinSizeLimit();
     }
 
     // Profile photos
@@ -29,7 +31,7 @@ service firebase.storage {
     // Default fallback
     match /{allPaths=**} {
       allow read: if true;
-      allow write: if isAuthenticated() && isImage() && isWithinSizeLimit();
+      allow write: if false;
     }
   }
 }

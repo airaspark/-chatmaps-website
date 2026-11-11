@@ -35,6 +35,7 @@ import { VendorProfile } from './pages/vendor/VendorProfile';
 
 // Admin Pages
 import { AdminDashboard } from './pages/admin/AdminDashboard';
+import { RequireAdmin } from './components/auth/RequireAdmin';
 
 export default function App() {
   return (
@@ -78,7 +79,11 @@ export default function App() {
             {/* Dedicated Admin Portal Routes (Isolated from customer navigation & bottom bar) */}
             <Route path="/admin" element={<AdminLogin />} />
             <Route path="/admin/login" element={<Navigate to="/admin" replace />} />
-            <Route path="/admin/dashboard" element={<AdminDashboard />} />
+            <Route path="/admin/dashboard" element={<RequireAdmin><AdminDashboard /></RequireAdmin>} />
+            <Route path="/admin/vendor-applications" element={<RequireAdmin><AdminDashboard /></RequireAdmin>} />
+            <Route path="/admin/stall-management" element={<RequireAdmin><AdminDashboard /></RequireAdmin>} />
+            <Route path="/admin/customers" element={<RequireAdmin><AdminDashboard /></RequireAdmin>} />
+            <Route path="/admin/live-map" element={<RequireAdmin><AdminDashboard /></RequireAdmin>} />
           </Routes>
         </BrowserRouter>
       </AppProvider>

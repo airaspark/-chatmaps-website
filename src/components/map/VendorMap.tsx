@@ -261,6 +261,7 @@ export const VendorMap: React.FC<VendorMapProps> = ({
     const hasGoogleMarker = typeof (window as any).google?.maps?.Marker === 'function';
 
     vendors.forEach((vendor) => {
+      if (!vendor.location || !Number.isFinite(vendor.location.lat) || !Number.isFinite(vendor.location.lng)) return;
       const isSelected = selectedVendor?.id === vendor.id;
       const position = { lat: vendor.location.lat, lng: vendor.location.lng };
       const title = `${vendor.shopName} (${vendor.isOpen ? 'Open' : 'Closed'})`;
@@ -416,7 +417,7 @@ export const VendorMap: React.FC<VendorMapProps> = ({
   let driveTimeText: string | null = null;
   let directionsUrl: string = '#';
 
-  if (selectedVendor && locationState.coords) {
+  if (selectedVendor && selectedVendor.location && locationState.coords) {
     const meters = locationService.calculateDistanceMeters(
       locationState.coords.lat,
       locationState.coords.lng,
@@ -431,7 +432,7 @@ export const VendorMap: React.FC<VendorMapProps> = ({
       selectedVendor.location,
       'walking'
     );
-  } else if (selectedVendor) {
+  } else if (selectedVendor?.location) {
     directionsUrl = `https://www.google.com/maps/dir/?api=1&destination=${selectedVendor.location.lat},${selectedVendor.location.lng}`;
   }
 
@@ -601,6 +602,9 @@ export const VendorMap: React.FC<VendorMapProps> = ({
                 <MapPin className="w-3 h-3 text-orange-500 shrink-0" />
                 <span>{selectedVendor.address}</span>
               </p>
+              {selectedVendor.gpsAccuracy !== undefined && (
+                <p className="text-[10px] text-stone-500 mt-0.5">GPS ±{selectedVendor.gpsAccuracy} m · Updated {selectedVendor.lastLocationAt ? new Date(selectedVendor.lastLocationAt).toLocaleTimeString() : 'time unavailable'}</p>
+              )}
 
               <div className="flex items-center justify-between mt-2 pt-2 border-t border-stone-100 dark:border-stone-800">
                 <div className="flex items-center gap-1 text-xs font-bold text-stone-800 dark:text-stone-200">

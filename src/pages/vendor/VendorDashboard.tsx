@@ -1,11 +1,13 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { vendorService } from '../../services/vendorService';
+import { vendorService, isCurrentOnlineVendor } from '../../services/vendorService';
 import { reviewService } from '../../services/reviewService';
 import { Vendor, Review } from '../../types';
 import { storageService } from '../../services/storageService';
+import { locationService, LocationState } from '../../services/locationService';
 import { getVendorCoverImage, STALL_PLACEHOLDER_IMAGE } from '../../data/foodImages';
+import { isFirebaseRealtimeDatabaseConfigured } from '../../services/firebase';
 import {
   Store,
   Clock,
@@ -38,6 +40,12 @@ export const VendorDashboard: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [togglingStatus, setTogglingStatus] = useState(false);
   const [toggleNotice, setToggleNotice] = useState('');
+  const [locationError, setLocationError] = useState('');
+  const [startingGps, setStartingGps] = useState(false);
+  const locationUnsubscribeRef = useRef<(() => void) | null>(null);
+  const locationWriteRef = useRef<Promise<void> | null>(null);
+  const lastLocationWriteRef = useRef<{ lat: number; lng: number; at: number } | null>(null);
+  const gpsSessionRef = useRef(0);
 
   useEffect(() => {
     const fetchVendorData = async () => {
@@ -50,13 +58,8 @@ export const VendorDashboard: React.FC = () => {
       // Try finding vendor belonging to current user
       let currentVendor = await vendorService.getVendorByOwnerUid(userProfile.uid);
 
-      // If user is a demo vendor or newly signed in, link to first vendor or pending vendor for preview
-      if (!currentVendor) {
-        const allVendors = await vendorService.getAllVendorsForAdmin();
-        currentVendor = allVendors.find(v => v.ownerUid === userProfile.uid) || allVendors[0];
-      }
-
       if (currentVendor) {
+        if (!isCurrentOnlineVendor(currentVendor)) currentVendor = { ...currentVendor, isOnline: false, locationAvailable: false };
         setVendor(currentVendor);
         const revs = await reviewService.getReviewsByVendorId(currentVendor.id);
         setReviews(revs);
@@ -65,8 +68,18 @@ export const VendorDashboard: React.FC = () => {
       setLoading(false);
     };
 
-    fetchVendorData();
+    fetchVendorData().catch(error => {
+      console.error('Unable to load vendor dashboard:', error);
+      setToggleNotice(error instanceof Error ? error.message : 'Unable to load the vendor record.');
+      setLoading(false);
+    });
   }, [userProfile]);
+
+  useEffect(() => () => {
+    gpsSessionRef.current += 1;
+    locationUnsubscribeRef.current?.();
+    locationService.stopTracking();
+  }, []);
 
   // LIVE OPEN / CLOSED TOGGLE
   // Requirement: "If a vendor updates shop details or availability, the customer website must show the updated information."
@@ -82,6 +95,88 @@ export const VendorDashboard: React.FC = () => {
       setTimeout(() => setToggleNotice(''), 4000);
     } catch (err: any) {
       console.error('Error toggling open status:', err);
+      setToggleNotice(err?.message || 'Could not update stall opening status.');
+    } finally {
+      setTogglingStatus(false);
+    }
+  };
+
+  const distanceMeters = (a: { lat: number; lng: number }, b: { lat: number; lng: number }) => {
+    const toRadians = (degrees: number) => degrees * Math.PI / 180;
+    const dLat = toRadians(b.lat - a.lat);
+    const dLng = toRadians(b.lng - a.lng);
+    const value = Math.sin(dLat / 2) ** 2 + Math.cos(toRadians(a.lat)) * Math.cos(toRadians(b.lat)) * Math.sin(dLng / 2) ** 2;
+    return 6371000 * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
+  };
+
+  const handleGoOnline = () => {
+    if (!vendor || !userProfile || vendor.status !== 'approved' || startingGps) return;
+    const gpsSession = ++gpsSessionRef.current;
+    setStartingGps(true);
+    setLocationError('Waiting for a device location with accuracy of 100 metres or better…');
+    const requestStartedAt = Date.now();
+    locationUnsubscribeRef.current?.();
+    locationUnsubscribeRef.current = locationService.subscribe((location: LocationState) => {
+      if (gpsSessionRef.current !== gpsSession) return;
+      if (location.status === 'denied' || location.status === 'error') {
+        setStartingGps(false);
+        setLocationError(location.errorMessage || 'Device location is unavailable.');
+        locationUnsubscribeRef.current?.();
+        locationUnsubscribeRef.current = null;
+        return;
+      }
+      if (location.status === 'requesting' || !location.coords || !location.timestamp || location.timestamp < requestStartedAt) return;
+      if (location.accuracy === null || location.accuracy > 100) {
+        setLocationError(`GPS accuracy is ±${location.accuracy ?? 'unknown'}m; move to an open area and wait for a more accurate reading.`);
+        return;
+      }
+
+      const now = Date.now();
+      const previous = lastLocationWriteRef.current;
+      if (previous && distanceMeters(previous, location.coords) < 15 && now - previous.at < 30_000) return;
+      lastLocationWriteRef.current = { ...location.coords, at: now };
+      locationWriteRef.current = vendorService.setVendorOnlineLocation(vendor.id, userProfile.uid, location.coords, location.accuracy)
+        .then(() => {
+          if (gpsSessionRef.current !== gpsSession) return;
+          setStartingGps(false);
+          setLocationError('');
+          setVendor(current => current ? {
+            ...current,
+            location: location.coords!,
+            gpsAccuracy: location.accuracy!,
+            locationAvailable: true,
+            isOnline: true,
+            lastLocationAt: new Date().toISOString()
+          } : current);
+        })
+        .catch(error => {
+          if (gpsSessionRef.current !== gpsSession) return;
+          setStartingGps(false);
+          setLocationError(error instanceof Error ? error.message : 'Could not publish the device location.');
+          locationUnsubscribeRef.current?.();
+          locationUnsubscribeRef.current = null;
+          locationService.stopTracking();
+        });
+    });
+    locationService.startTracking();
+  };
+
+  const handleGoOffline = async () => {
+    if (!vendor || !userProfile) return;
+    gpsSessionRef.current += 1;
+    setTogglingStatus(true);
+    setLocationError('');
+    locationUnsubscribeRef.current?.();
+    locationUnsubscribeRef.current = null;
+    locationService.stopTracking();
+    try {
+      await locationWriteRef.current?.catch(() => undefined);
+      locationWriteRef.current = null;
+      await vendorService.setVendorOffline(vendor.id, userProfile.uid);
+      setVendor(current => current ? { ...current, isOnline: false, locationAvailable: false } : current);
+      setToggleNotice('You are offline. Your stall remains registered and approved.');
+    } catch (error) {
+      setLocationError(error instanceof Error ? error.message : 'Could not go offline.');
     } finally {
       setTogglingStatus(false);
     }
@@ -94,7 +189,7 @@ export const VendorDashboard: React.FC = () => {
 
   const handleCoverUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !vendor) return;
+    if (!file || !vendor || !userProfile) return;
 
     if (!file.type.startsWith('image/')) {
       setCoverError('Please select a valid image file (JPEG, PNG, WebP).');
@@ -114,7 +209,7 @@ export const VendorDashboard: React.FC = () => {
       // 1. Upload to Firebase Storage
       const downloadUrl = await storageService.uploadImage(
         file,
-        `vendors/${vendor.id}/cover_${Date.now()}.jpg`
+        `vendors/${userProfile.uid}/cover_${Date.now()}.jpg`
       );
 
       // 2. Update coverImageUrl and bannerImage in Firestore
@@ -209,7 +304,7 @@ export const VendorDashboard: React.FC = () => {
       <div className="bg-white rounded-3xl p-6 sm:p-8 border border-stone-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-6">
         <div className="flex items-center gap-4">
           <img
-            src={vendor.bannerImage || vendor.photos[0]}
+            src={getVendorCoverImage(vendor)}
             alt={vendor.shopName}
             className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl object-cover border border-stone-200 shrink-0"
           />
@@ -281,44 +376,54 @@ export const VendorDashboard: React.FC = () => {
         </div>
       )}
 
-      {/* LIVE OPEN/CLOSED TOGGLE HERO CARD */}
+      {/* LIVE LOCATION + STALL AVAILABILITY */}
       <div className={`rounded-3xl p-6 sm:p-8 border transition-all ${
-        vendor.isOpen
+        vendor.isOnline
           ? 'bg-emerald-500/10 border-emerald-300'
           : 'bg-stone-100 border-stone-300'
       }`}>
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6">
           <div className="space-y-1">
             <div className="flex items-center gap-2">
-              <span className={`w-3.5 h-3.5 rounded-full ${vendor.isOpen ? 'bg-emerald-500 animate-ping' : 'bg-stone-400'}`} />
+              <span className={`w-3.5 h-3.5 rounded-full ${vendor.isOnline ? 'bg-emerald-500 animate-ping' : 'bg-stone-400'}`} />
               <h2 className="text-xl sm:text-2xl font-black text-stone-900">
-                Stall Availability: {vendor.isOpen ? 'OPEN NOW' : 'CURRENTLY CLOSED'}
+                Cart Location: {vendor.isOnline ? 'ONLINE' : 'OFFLINE'}
               </h2>
             </div>
             <p className="text-xs sm:text-sm text-stone-600 max-w-xl">
-              {vendor.isOpen
-                ? 'Your stall is currently marked OPEN. Nearby customers on the Live Map and Explore feed can see your active stall and get directions.'
-                : 'Your stall is marked CLOSED. Toggle it on whenever you are set up and ready to serve foodies!'}
+              {vendor.isOnline
+                ? `Your device location is shared while this dashboard is open. GPS accuracy: ±${vendor.gpsAccuracy ?? '—'}m.`
+                : 'Go online only after you are at your cart. ChatMaps requests your device GPS and publishes the stall after a valid fix.'}
             </p>
+            {vendor.status !== 'approved' && <p className="text-xs font-semibold text-amber-700">Admin approval is required before this cart can go online.</p>}
+            <p className="text-[11px] text-stone-500">Mobile browsers may pause GPS when this page is backgrounded. Stale locations are hidden from live maps.</p>
+            {!isFirebaseRealtimeDatabaseConfigured() && <p className="text-[11px] text-amber-700">Automatic disconnect presence is not configured. If the browser closes unexpectedly, the map hides this location after its 2 minute freshness window; use GO OFFLINE when possible.</p>}
           </div>
 
           <button
-            onClick={handleToggleOpenStatus}
-            disabled={togglingStatus}
+            onClick={vendor.isOnline ? handleGoOffline : handleGoOnline}
+            disabled={togglingStatus || startingGps || (!vendor.isOnline && vendor.status !== 'approved')}
             className={`px-6 py-3.5 rounded-2xl font-black text-sm shadow-lg flex items-center justify-center gap-2.5 transition active:scale-95 ${
-              vendor.isOpen
+              vendor.isOnline
                 ? 'bg-rose-600 hover:bg-rose-700 text-white shadow-rose-600/30'
                 : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-600/30'
             }`}
           >
             <Power className="w-4 h-4" />
             <span>
-              {togglingStatus
-                ? 'Updating...'
-                : vendor.isOpen
-                ? 'Close Stall for the Day'
-                : 'Open Stall Now'}
+              {startingGps ? 'Finding GPS…' : togglingStatus ? 'Updating…' : vendor.isOnline ? 'GO OFFLINE' : 'GO ONLINE'}
             </span>
+          </button>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-stone-300/70 pt-4">
+          <span className="text-xs font-semibold text-stone-600">Stall serving status: {vendor.isOpen ? 'Open' : 'Closed'}</span>
+          <button
+            onClick={handleToggleOpenStatus}
+            disabled={togglingStatus || vendor.status !== 'approved'}
+            className="px-3 py-2 rounded-xl bg-white border border-stone-300 text-stone-700 text-xs font-bold disabled:opacity-50"
+          >
+            Mark {vendor.isOpen ? 'Closed' : 'Open'}
           </button>
         </div>
 
@@ -327,6 +432,9 @@ export const VendorDashboard: React.FC = () => {
             <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
             <span>{toggleNotice}</span>
           </div>
+        )}
+        {locationError && (
+          <div role="alert" className="mt-3 p-3 bg-rose-50 rounded-xl text-xs font-semibold text-rose-800 border border-rose-200">{locationError}</div>
         )}
       </div>
 
