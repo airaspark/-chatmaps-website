@@ -1,0 +1,88 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Admin verification: checks admins collection or users collection with active status
+    function isAdmin() {
+      return isAuthenticated() && (
+        (exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.status == 'active') ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status != 'suspended')
+      );
+    }
+
+    function isVendor() {
+      return isAuthenticated() && 
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'vendor';
+    }
+
+    // ADMINS COLLECTION
+    // Only verified administrators can read and manage admin records
+    match /admins/{adminId} {
+      allow read: if isAuthenticated() && (request.auth.uid == adminId || isAdmin());
+      allow write: if isAdmin();
+    }
+
+    // USERS COLLECTION (CUSTOMERS & VENDORS)
+    // Authenticated users can read their own profile; Admin can read and manage all users
+    // Registration cannot self-assign role == 'admin'
+    // Users cannot modify their role or change their suspension status
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+      allow create: if isAuthenticated() && request.auth.uid == userId && request.resource.data.role != 'admin';
+      allow update: if (
+        isOwner(userId) &&
+        request.resource.data.role == resource.data.role &&
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['status', 'role']))
+      ) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // VENDORS COLLECTION
+    // Public can read only 'approved' vendors that are not suspended
+    // Vendor owner and Admin can read all (including pending, rejected, suspended)
+    // Vendors cannot self-approve or elevate status
+    // Only Admin can approve, reject, suspend, or delete vendor listings
+    match /vendors/{vendorId} {
+      allow read: if (resource.data.status == 'approved' && resource.data.status != 'suspended') 
+                  || (isAuthenticated() && (resource.data.ownerUid == request.auth.uid || isAdmin()));
+      
+      allow create: if (isAuthenticated() && (
+        request.resource.data.ownerUid == request.auth.uid &&
+        request.resource.data.status == 'pending'
+      )) || isAdmin();
+
+      allow update: if (
+        isAuthenticated() && 
+        resource.data.ownerUid == request.auth.uid &&
+        request.resource.data.status == resource.data.status // Cannot self-approve
+      ) || isAdmin();
+
+      allow delete: if isAdmin();
+    }
+
+    // REVIEWS COLLECTION
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if (isAuthenticated() && resource.data.userId == request.auth.uid) || isAdmin();
+    }
+
+    // FAVORITES COLLECTION
+    match /favorites/{favoriteId} {
+      allow read, create, delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+  }
+}

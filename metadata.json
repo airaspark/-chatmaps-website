@@ -1,0 +1,10 @@
+{
+  "name": "ChatMaps",
+  "description": "Discover nearby authentic street-food vendors with live maps, opening hours, menus, directions, and reviews across India.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
