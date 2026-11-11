@@ -47,6 +47,9 @@ export interface WalkingSession {
   durationSeconds: number;
   distanceKm: number;
   steps: number;
+  stepSource?: 'gps-estimate' | 'device';
+  calorieEstimate?: boolean;
+  weightKgUsed?: number;
   caloriesBurned: number;
   route: WalkingRoutePoint[];
   isActive: boolean;
@@ -76,9 +79,15 @@ const STORAGE_DIARY_PREFIX = 'chatmaps_diary_';
 const STORAGE_BUDGET_KEY = 'chatmaps_daily_budget';
 const STORAGE_WALKING_KEY = 'chatmaps_active_walking';
 
+const userStorageSuffix = () => auth?.currentUser?.uid ? `user_${auth.currentUser.uid}_` : '';
+const diaryStorageKey = (dateKey: string) => `${STORAGE_DIARY_PREFIX}${userStorageSuffix()}${dateKey}`;
+const budgetStorageKey = () => `${userStorageSuffix()}${STORAGE_BUDGET_KEY}`;
+const walkingStorageKey = (uid: string | null = auth?.currentUser?.uid || null) => `${uid ? `user_${uid}_` : ''}${STORAGE_WALKING_KEY}`;
+
 class CalorieService {
   private activeWalkInterval: any = null;
   private activeWalkSession: WalkingSession | null = null;
+  private activeWalkUserUid: string | null = null;
   private walkListeners: Set<(session: WalkingSession | null) => void> = new Set();
   private diaryListeners: Set<(summary: DailyActivitySummary) => void> = new Set();
 
@@ -92,7 +101,7 @@ class CalorieService {
 
   public getDailyBudget(): number {
     try {
-      const saved = localStorage.getItem(STORAGE_BUDGET_KEY);
+      const saved = localStorage.getItem(budgetStorageKey());
       if (saved) return parseInt(saved, 10);
     } catch {}
     return 2000;
@@ -100,7 +109,7 @@ class CalorieService {
 
   public setDailyBudget(budget: number): void {
     try {
-      localStorage.setItem(STORAGE_BUDGET_KEY, budget.toString());
+      localStorage.setItem(budgetStorageKey(), budget.toString());
       this.syncSummaryToFirestore(this.getTodaySummary());
     } catch {}
   }
@@ -119,7 +128,7 @@ class CalorieService {
     let walkingSessions: WalkingSession[] = [];
 
     try {
-      const saved = localStorage.getItem(`${STORAGE_DIARY_PREFIX}${dateKey}`);
+      const saved = localStorage.getItem(diaryStorageKey(dateKey));
       if (saved) {
         const parsed = JSON.parse(saved);
         entries = parsed.entries || [];
@@ -144,7 +153,8 @@ class CalorieService {
       walkingSessions.reduce((acc, curr) => acc + curr.durationSeconds, 0) / 60
     );
 
-    const netCalories = Math.max(0, totalCaloriesConsumed - totalCaloriesBurned);
+    // Food budget tracks intake only; exercise expenditure stays separate.
+    const netCalories = totalCaloriesConsumed;
     const remainingCalories = Math.max(0, defaultBudget - netCalories);
 
     return {
@@ -192,7 +202,7 @@ class CalorieService {
     };
 
     const today = this.getTodayKey();
-    const key = `${STORAGE_DIARY_PREFIX}${today}`;
+    const key = diaryStorageKey(today);
     let entries: FoodDiaryEntry[] = [];
     let walkingSessions: WalkingSession[] = [];
 
@@ -218,7 +228,7 @@ class CalorieService {
     updates: Partial<Pick<FoodDiaryEntry, 'meal' | 'servingMultiplier' | 'servingLabel'>>
   ): void {
     const today = this.getTodayKey();
-    const key = `${STORAGE_DIARY_PREFIX}${today}`;
+    const key = diaryStorageKey(today);
 
     try {
       const saved = localStorage.getItem(key);
@@ -261,7 +271,7 @@ class CalorieService {
    */
   public deleteFoodEntry(entryId: string): void {
     const today = this.getTodayKey();
-    const key = `${STORAGE_DIARY_PREFIX}${today}`;
+    const key = diaryStorageKey(today);
 
     try {
       const saved = localStorage.getItem(key);
@@ -286,11 +296,21 @@ class CalorieService {
   // ==========================================
 
   public getActiveWalkingSession(): WalkingSession | null {
+    const currentUid = auth?.currentUser?.uid || null;
+    if (this.activeWalkSession && this.activeWalkUserUid !== currentUid) {
+      this.stopWalkingTimer();
+      this.activeWalkSession = null;
+    }
+    this.activeWalkUserUid = currentUid;
     if (this.activeWalkSession) return this.activeWalkSession;
     try {
-      const saved = localStorage.getItem(STORAGE_WALKING_KEY);
+      const saved = localStorage.getItem(walkingStorageKey(currentUid));
       if (saved) {
         this.activeWalkSession = JSON.parse(saved);
+        if (this.activeWalkSession?.isActive && !this.activeWalkSession.isPaused) {
+          this.activeWalkSession.isPaused = true;
+          this.saveActiveWalkToStorage();
+        }
         return this.activeWalkSession;
       }
     } catch {}
@@ -325,7 +345,8 @@ class CalorieService {
   /**
    * Start a new walking session
    */
-  public startWalking(initialCoords?: { lat: number; lng: number }): WalkingSession {
+  public startWalking(initialCoords?: { lat: number; lng: number }, weightKg?: number): WalkingSession {
+    this.getActiveWalkingSession();
     if (this.activeWalkSession && this.activeWalkSession.isActive) {
       if (this.activeWalkSession.isPaused) {
         this.resumeWalking();
@@ -343,6 +364,9 @@ class CalorieService {
       durationSeconds: 0,
       distanceKm: 0,
       steps: 0,
+      stepSource: 'gps-estimate',
+      calorieEstimate: true,
+      weightKgUsed: Number.isFinite(weightKg) && (weightKg as number) > 0 ? weightKg : 70,
       caloriesBurned: 0,
       route: initialRoute,
       isActive: true,
@@ -350,6 +374,7 @@ class CalorieService {
     };
 
     this.activeWalkSession = newSession;
+    this.activeWalkUserUid = auth?.currentUser?.uid || null;
     this.saveActiveWalkToStorage();
     this.startWalkingTimer();
     this.notifyWalk();
@@ -397,12 +422,11 @@ class CalorieService {
         const addedKm = distMeters / 1000;
         const newDist = Number((this.activeWalkSession.distanceKm + addedKm).toFixed(3));
         
-        // Realistic step calculation: average stride is ~0.76m (~1,315 steps per km)
+        // GPS distance can only produce an estimate, not a device-recorded step count.
         const addedSteps = Math.round(distMeters / 0.76);
         const newSteps = this.activeWalkSession.steps + addedSteps;
 
-        // Realistic walking burn: ~55 kcal per km for average 68kg adult
-        const newCalories = Math.round(newDist * 55 + (this.activeWalkSession.durationSeconds / 60) * 1.5);
+        const newCalories = this.estimateWalkingCalories(newDist, this.activeWalkSession.durationSeconds, this.activeWalkSession.weightKgUsed || 70);
 
         this.activeWalkSession.distanceKm = newDist;
         this.activeWalkSession.steps = newSteps;
@@ -423,6 +447,7 @@ class CalorieService {
    * Finish and save walking session
    */
   public stopWalking(): WalkingSession | null {
+    this.getActiveWalkingSession();
     if (!this.activeWalkSession) return null;
 
     this.stopWalkingTimer();
@@ -436,7 +461,7 @@ class CalorieService {
     // Save to today's history if distance > 0.02 km or duration > 15s
     if (completedSession.distanceKm >= 0.02 || completedSession.durationSeconds >= 15) {
       const today = this.getTodayKey();
-      const key = `${STORAGE_DIARY_PREFIX}${today}`;
+      const key = diaryStorageKey(today);
       let entries: FoodDiaryEntry[] = [];
       let walkingSessions: WalkingSession[] = [];
 
@@ -455,8 +480,9 @@ class CalorieService {
 
     this.activeWalkSession = null;
     try {
-      localStorage.removeItem(STORAGE_WALKING_KEY);
+      localStorage.removeItem(walkingStorageKey(this.activeWalkUserUid));
     } catch {}
+    this.activeWalkUserUid = auth?.currentUser?.uid || null;
 
     this.notifyWalk();
     return completedSession;
@@ -465,14 +491,22 @@ class CalorieService {
   private startWalkingTimer() {
     this.stopWalkingTimer();
     this.activeWalkInterval = setInterval(() => {
+      if (this.activeWalkUserUid !== (auth?.currentUser?.uid || null)) {
+        this.activeWalkSession = null;
+        this.activeWalkUserUid = auth?.currentUser?.uid || null;
+        this.stopWalkingTimer();
+        this.notifyWalk();
+        return;
+      }
       if (this.activeWalkSession && this.activeWalkSession.isActive && !this.activeWalkSession.isPaused) {
         this.activeWalkSession.durationSeconds += 1;
-        // Minor time-based calorie increment even during slight pauses
+        // Update an estimate from measured distance and elapsed session time; no distance means no burn estimate.
         if (this.activeWalkSession.durationSeconds % 30 === 0) {
-          const baseBurn = Math.round(
-            this.activeWalkSession.distanceKm * 55 + (this.activeWalkSession.durationSeconds / 60) * 1.5
+          this.activeWalkSession.caloriesBurned = this.estimateWalkingCalories(
+            this.activeWalkSession.distanceKm,
+            this.activeWalkSession.durationSeconds,
+            this.activeWalkSession.weightKgUsed || 70
           );
-          this.activeWalkSession.caloriesBurned = Math.max(1, baseBurn);
           this.saveActiveWalkToStorage();
         }
         this.notifyWalk();
@@ -487,17 +521,26 @@ class CalorieService {
     }
   }
 
+  private estimateWalkingCalories(distanceKm: number, durationSeconds: number, weightKg: number): number {
+    if (distanceKm <= 0 || durationSeconds <= 0) return 0;
+    const hours = durationSeconds / 3600;
+    const speedKmh = distanceKm / hours;
+    const met = speedKmh < 3.2 ? 2.8 : speedKmh < 5.6 ? 3.5 : 5;
+    return Math.max(0, Math.round(met * weightKg * hours));
+  }
+
   private saveActiveWalkToStorage() {
     if (!this.activeWalkSession) return;
+    if (this.activeWalkUserUid !== (auth?.currentUser?.uid || null)) return;
     try {
-      localStorage.setItem(STORAGE_WALKING_KEY, JSON.stringify(this.activeWalkSession));
+      localStorage.setItem(walkingStorageKey(this.activeWalkUserUid), JSON.stringify(this.activeWalkSession));
     } catch {}
   }
 
   private saveData(dateKey: string, entries: FoodDiaryEntry[], walkingSessions: WalkingSession[]) {
     try {
       const payload = { entries, walkingSessions };
-      localStorage.setItem(`${STORAGE_DIARY_PREFIX}${dateKey}`, JSON.stringify(payload));
+      localStorage.setItem(diaryStorageKey(dateKey), JSON.stringify(payload));
       this.notifyDiary();
       this.syncSummaryToFirestore(this.getDaySummary(dateKey));
     } catch {}
@@ -557,7 +600,7 @@ class CalorieService {
           const cloudWalking: WalkingSession[] = cloudData.walkingSessions || [];
           
           // Merge with local storage
-          const localSaved = localStorage.getItem(`${STORAGE_DIARY_PREFIX}${dateKey}`);
+          const localSaved = localStorage.getItem(diaryStorageKey(dateKey));
           const localParsed = localSaved ? JSON.parse(localSaved) : { entries: [], walkingSessions: [] };
 
           const mergedEntriesMap = new Map<string, FoodDiaryEntry>();

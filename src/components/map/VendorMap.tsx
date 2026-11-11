@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Vendor } from '../../types';
+import { isVendorLocationFresh } from '../../services/vendorService';
 import { useApp } from '../../context/AppContext';
 import { locationService, LocationState, GpsCoordinates } from '../../services/locationService';
 import {
@@ -25,7 +26,7 @@ import { getGoogleMapsMapId, loadGoogleMapsLibraries } from '../../services/goog
 interface VendorMapProps {
   vendors: Vendor[];
   selectedVendor: Vendor | null;
-  onSelectVendor: (vendor: Vendor) => void;
+  onSelectVendor: (vendor: Vendor | null) => void;
   center?: { lat: number; lng: number };
   zoom?: number;
   className?: string;
@@ -44,8 +45,8 @@ export const CHATMAPS_MAP_ID = getGoogleMapsMapId();
  * Returns SVG markup for custom orange ChatMaps vendor map pins
  */
 const getPinSvgMarkup = (isSelected: boolean, isOpen: boolean, width: number, height: number): string => {
-  const primaryOrange = isSelected ? '#EA580C' : isOpen ? '#F97316' : '#78716C';
-  const darkOrange = isSelected ? '#C2410C' : isOpen ? '#EA580C' : '#57534E';
+  const primaryOrange = isSelected ? '#EA580C' : '#F97316';
+  const darkOrange = '#C2410C';
 
   return `
     <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 36 44">
@@ -61,11 +62,9 @@ const getPinSvgMarkup = (isSelected: boolean, isOpen: boolean, width: number, he
       <!-- Teardrop Pin Body -->
       <path filter="url(#chatmapsShadow)" fill="url(#cmGrad)" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
         d="M18 2 C9.7 2 3 8.7 3 17 C3 27.5 16.5 40.8 17.2 41.5 C17.6 41.9 18.4 41.9 18.8 41.5 C19.5 40.8 33 27.5 33 17 C33 8.7 26.3 2 18 2 Z"/>
-      <!-- Inner White Circle -->
-      <circle cx="18" cy="17" r="7.5" fill="#FFFFFF"/>
-      <!-- Brand Orange Core -->
-      <circle cx="18" cy="17" r="4.5" fill="${isOpen ? '#EA580C' : '#78716C'}"/>
-      ${isOpen ? '<circle cx="18" cy="17" r="2" fill="#FED7AA"/>' : ''}
+      <!-- White cart badge -->
+      <circle cx="18" cy="17" r="9" fill="#FFFFFF" stroke="${primaryOrange}" stroke-width="1.5"/>
+      <path d="M11.5 12.5h2l1.6 8h7.7l1.7-5.6h-9.8M17 24.1a1.1 1.1 0 1 0 0 .1M22.1 24.1a1.1 1.1 0 1 0 0 .1" fill="none" stroke="${isOpen ? '#EA580C' : '#57534E'}" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
   `.trim();
 };
@@ -74,16 +73,48 @@ const getPinSvgMarkup = (isSelected: boolean, isOpen: boolean, width: number, he
  * Creates custom DOM element for AdvancedMarkerElement
  */
 const createChatMapsAdvancedPinElement = (isSelected: boolean, isOpen: boolean): HTMLElement => {
-  const width = isSelected ? 44 : 36;
-  const height = isSelected ? 52 : 44;
+  const width = 36;
+  const height = 42;
   const wrapper = document.createElement('div');
-  wrapper.className = `chatmaps-marker-pin transition-transform duration-200 cursor-pointer ${
-    isSelected ? 'scale-110 drop-shadow-xl' : 'hover:scale-105 drop-shadow-md'
-  }`;
+  wrapper.className = `chatmaps-marker-pin cursor-pointer ${isSelected ? 'drop-shadow-xl' : 'drop-shadow-md'}`;
   wrapper.style.width = `${width}px`;
   wrapper.style.height = `${height}px`;
   wrapper.innerHTML = getPinSvgMarkup(isSelected, isOpen, width, height);
   return wrapper;
+};
+
+const preferredZoomFor250mRange = (latitude: number, viewportWidth: number): number => {
+  const metersPerPixelAtZoom0 = 156543.03392 * Math.max(0.1, Math.cos(latitude * Math.PI / 180));
+  const zoom = Math.log2((metersPerPixelAtZoom0 * Math.max(320, viewportWidth)) / 500);
+  return Math.max(3, Math.min(21, Math.round(zoom * 10) / 10));
+};
+
+const worldPoint = (position: { lat: number; lng: number }, zoom: number) => {
+  const scale = 256 * 2 ** zoom;
+  const sin = Math.sin(position.lat * Math.PI / 180);
+  return {
+    x: (position.lng + 180) / 360 * scale,
+    y: (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * scale
+  };
+};
+
+const pointPosition = (point: { x: number; y: number }, zoom: number) => {
+  const scale = 256 * 2 ** zoom;
+  return {
+    lng: point.x / scale * 360 - 180,
+    lat: (Math.atan(Math.sinh(Math.PI * (1 - 2 * point.y / scale))) * 180) / Math.PI
+  };
+};
+
+const makeClusterElement = (count: number): HTMLElement => {
+  const element = document.createElement('div');
+  element.className = 'flex items-center justify-center rounded-full border-[3px] border-white bg-orange-600 font-black text-white shadow-xl';
+  element.style.width = '48px';
+  element.style.height = '48px';
+  element.style.fontSize = '14px';
+  element.textContent = String(count);
+  element.setAttribute('aria-label', `${count} online food carts`);
+  return element;
 };
 
 /**
@@ -111,12 +142,12 @@ export const VendorMap: React.FC<VendorMapProps> = ({
   vendors,
   selectedVendor,
   onSelectVendor,
-  center = { lat: 0, lng: 0 },
-  zoom = 2,
+  center,
+  zoom,
   className = 'h-full w-full',
   showCardOverlay = true
 }) => {
-  const { theme, gpsActive } = useApp();
+  const { theme, gpsActive, customerCoordinates, isDetectingLocation, detectCurrentLocation, locationError } = useApp();
   const mapRef = useRef<HTMLDivElement>(null);
   const [mapLoaded, setMapLoaded] = useState(false);
   const [mapLoading, setMapLoading] = useState(true);
@@ -124,15 +155,21 @@ export const VendorMap: React.FC<VendorMapProps> = ({
   const [isLocating, setIsLocating] = useState(false);
   const [locationState, setLocationState] = useState<LocationState>(() => locationService.getState());
   const [accuracyModalOpen, setAccuracyModalOpen] = useState(false);
+  const [freshnessNow, setFreshnessNow] = useState(Date.now());
 
   const googleMapInstanceRef = useRef<any>(null);
   const markersRef = useRef<any[]>([]);
+  const spiderLinesRef = useRef<any[]>([]);
   const userMarkerRef = useRef<any>(null);
   const userAccuracyCircleRef = useRef<any>(null);
   const advancedMarkerClassRef = useRef<any>(null);
-  const hasInitialVendorViewportRef = useRef(false);
   const hasCenteredOnGpsRef = useRef(false);
   const followUserRef = useRef(false);
+  const gpsRequestAttemptedRef = useRef(false);
+  const [mapZoom, setMapZoom] = useState(zoom || 2);
+  const [mapViewportVersion, setMapViewportVersion] = useState(0);
+  const onSelectVendorRef = useRef(onSelectVendor);
+  onSelectVendorRef.current = onSelectVendor;
 
   // Subscribe to location updates
   useEffect(() => {
@@ -142,11 +179,29 @@ export const VendorMap: React.FC<VendorMapProps> = ({
     return () => unsubscribe();
   }, []);
 
+  // Freshness is a display state only and never changes vendor availability.
+  useEffect(() => {
+    const timer = window.setInterval(() => setFreshnessNow(Date.now()), 15_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (gpsRequestAttemptedRef.current) return;
+    const hasRecentFix = !!locationState.coords && !!locationState.timestamp && Date.now() - locationState.timestamp < 120_000;
+    if (hasRecentFix) return;
+    gpsRequestAttemptedRef.current = true;
+    if (isDetectingLocation) return;
+    void detectCurrentLocation();
+  }, [customerCoordinates, detectCurrentLocation, isDetectingLocation, locationState.coords, locationState.timestamp]);
+
   // Initialize Google Maps with Map ID
   useEffect(() => {
     let isCancelled = false;
     let tilesTimeout: number | undefined;
     let tilesLoadedListener: any;
+    let zoomChangedListener: any;
+    let idleListener: any;
+    let resizeObserver: ResizeObserver | undefined;
 
     const handleMapsAuthFailure = () => {
       if (tilesTimeout !== undefined) window.clearTimeout(tilesTimeout);
@@ -175,14 +230,23 @@ export const VendorMap: React.FC<VendorMapProps> = ({
         if (isCancelled || !mapRef.current) return;
 
         const colorSchemeMode = theme === 'dark' ? 'DARK' : 'LIGHT';
+        const initialPosition = customerCoordinates || locationState.coords || center;
+        const initialZoom = zoom ?? (initialPosition
+          ? preferredZoomFor250mRange(initialPosition.lat, mapRef.current.clientWidth)
+          : 5);
 
         const mapOptions: any = {
-          center,
-          zoom,
+          // Neutral regional starting view; this is never presented as customer GPS.
+          center: initialPosition || { lat: 20.5937, lng: 78.9629 },
+          zoom: initialZoom,
           mapId: CHATMAPS_MAP_ID,
           // Keep cloud styling but use raster tiles to avoid the failing WebGL vector renderer.
           renderingType: RenderingType.RASTER,
           colorScheme: colorSchemeMode,
+          tilt: 0,
+          heading: 0,
+          rotateControl: false,
+          tiltInteractionEnabled: false,
           zoomControl: true,
           mapTypeControl: false,
           streetViewControl: false,
@@ -191,6 +255,24 @@ export const VendorMap: React.FC<VendorMapProps> = ({
 
         const gMap = new Map(mapRef.current, mapOptions);
         googleMapInstanceRef.current = gMap;
+        if (typeof ResizeObserver !== 'undefined' && mapRef.current) {
+          resizeObserver = new ResizeObserver(() => {
+            const mapsApi = (window as any).google?.maps;
+            if (mapsApi?.event?.trigger) mapsApi.event.trigger(gMap, 'resize');
+            const currentCenter = gMap.getCenter?.();
+            if (currentCenter) gMap.setCenter(currentCenter);
+          });
+          resizeObserver.observe(mapRef.current);
+        }
+        setMapZoom(initialZoom);
+        zoomChangedListener = gMap.addListener('zoom_changed', () => {
+          const currentZoom = gMap.getZoom();
+          if (typeof currentZoom === 'number') {
+            setMapZoom(currentZoom);
+            if (currentZoom < 10) onSelectVendorRef.current(null);
+          }
+        });
+        idleListener = gMap.addListener('idle', () => setMapViewportVersion(version => version + 1));
         setMapLoaded(true);
         tilesLoadedListener = gMap.addListener('tilesloaded', () => {
           if (tilesTimeout !== undefined) window.clearTimeout(tilesTimeout);
@@ -228,6 +310,9 @@ export const VendorMap: React.FC<VendorMapProps> = ({
       isCancelled = true;
       if (tilesTimeout !== undefined) window.clearTimeout(tilesTimeout);
       tilesLoadedListener?.remove?.();
+      zoomChangedListener?.remove?.();
+      idleListener?.remove?.();
+      resizeObserver?.disconnect();
       window.removeEventListener('gm_authFailure', handleMapsAuthFailure);
     };
   }, []);
@@ -246,7 +331,7 @@ export const VendorMap: React.FC<VendorMapProps> = ({
     }
   }, [theme]);
 
-  // Update Vendor Markers (Only approved Firestore vendors)
+  // Rebuild fixed-pixel clusters when data or zoom changes; never alter viewport for vendor updates.
   useEffect(() => {
     if (!mapLoaded || !googleMapInstanceRef.current) return;
 
@@ -255,48 +340,104 @@ export const VendorMap: React.FC<VendorMapProps> = ({
       else m.map = null;
     });
     markersRef.current = [];
+    spiderLinesRef.current.forEach(line => line.setMap(null));
+    spiderLinesRef.current = [];
 
     const gMap = googleMapInstanceRef.current;
     const AdvancedMarker = advancedMarkerClassRef.current;
-    const hasGoogleMarker = typeof (window as any).google?.maps?.Marker === 'function';
+    const maps = (window as any).google?.maps;
+    const zoomLevel = typeof gMap.getZoom() === 'number' ? gMap.getZoom() : mapZoom;
+    if (zoomLevel < 10) return;
+    const clusterRadius = zoomLevel < 16.5 ? 54 : 46;
+    const bounds = gMap.getBounds?.();
+    const mapCenter = gMap.getCenter?.();
+    if (!bounds || !mapCenter) return;
+    const points = vendors.flatMap(vendor => {
+      const location = vendor.location;
+      if (!location || !Number.isFinite(location.lat) || !Number.isFinite(location.lng)) return [];
+      if (bounds && !bounds.contains(location)) return [];
+      if (zoomLevel < 13 && locationService.calculateDistanceMeters(mapCenter.lat(), mapCenter.lng(), location.lat, location.lng) > 50_000) return [];
+      return [{ vendor, position: { lat: location.lat, lng: location.lng }, pixel: worldPoint(location, zoomLevel) }];
+    });
+    const groups: typeof points[] = [];
+    const worldWidth = 256 * 2 ** zoomLevel;
+    points.forEach(point => {
+      const group = groups.find(candidate => candidate.some(member => {
+        const rawDx = Math.abs(point.pixel.x - member.pixel.x);
+        const dx = Math.min(rawDx, worldWidth - rawDx);
+        return Math.hypot(dx, point.pixel.y - member.pixel.y) < clusterRadius;
+      }));
+      if (group) group.push(point);
+      else groups.push([point]);
+    });
 
-    vendors.forEach((vendor) => {
-      if (!vendor.location || !Number.isFinite(vendor.location.lat) || !Number.isFinite(vendor.location.lng)) return;
+    const addMarker = (vendor: Vendor, position: { lat: number; lng: number }, titleSuffix = '') => {
       const isSelected = selectedVendor?.id === vendor.id;
-      const position = { lat: vendor.location.lat, lng: vendor.location.lng };
-      const title = `${vendor.shopName} (${vendor.isOpen ? 'Open' : 'Closed'})`;
-
+      const title = `${vendor.shopName} (${vendor.isOpen ? 'Open' : 'Closed'})${titleSuffix}`;
       if (AdvancedMarker) {
-        const pinContent = createChatMapsAdvancedPinElement(isSelected, vendor.isOpen);
         const marker = new AdvancedMarker({
           map: gMap,
           position,
           title,
-          content: pinContent,
+          content: createChatMapsAdvancedPinElement(isSelected, vendor.isOpen),
+          anchorLeft: '-50%',
+          anchorTop: '-100%',
           zIndex: isSelected ? 999 : 10
         });
-
-        marker.addListener('click', () => {
-          onSelectVendor(vendor);
-        });
-
+        marker.addListener('click', () => onSelectVendor(vendor));
         markersRef.current.push(marker);
-      } else if (hasGoogleMarker) {
-        const marker = new (window as any).google.maps.Marker({
+      } else if (typeof maps?.Marker === 'function') {
+        const iconMarkup = getPinSvgMarkup(isSelected, vendor.isOpen, 36, 42);
+        const marker = new maps.Marker({
           position,
           map: gMap,
           title,
+          icon: { url: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(iconMarkup)}`, scaledSize: new maps.Size(36, 42), anchor: new maps.Point(18, 42) },
           zIndex: isSelected ? 999 : 10
         });
-
-        marker.addListener('click', () => {
-          onSelectVendor(vendor);
-        });
-
+        marker.addListener('click', () => onSelectVendor(vendor));
         markersRef.current.push(marker);
       }
+    };
+
+    groups.forEach(group => {
+      if (group.length === 1) {
+        addMarker(group[0].vendor, group[0].position);
+        return;
+      }
+
+      const centerPixel = group.reduce((center, point) => ({ x: center.x + point.pixel.x / group.length, y: center.y + point.pixel.y / group.length }), { x: 0, y: 0 });
+      const centerPosition = pointPosition(centerPixel, zoomLevel);
+      if (zoomLevel < 16.5) {
+        if (AdvancedMarker) {
+          const marker = new AdvancedMarker({ map: gMap, position: centerPosition, title: `${group.length} online food carts`, content: makeClusterElement(group.length), anchorLeft: '-50%', anchorTop: '-50%', zIndex: 500 });
+          marker.addListener('click', () => {
+            gMap.panTo(centerPosition);
+            gMap.setZoom(Math.min(21, zoomLevel + 2));
+          });
+          markersRef.current.push(marker);
+        } else if (typeof maps?.Marker === 'function') {
+          const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48"><circle cx="24" cy="24" r="21" fill="#EA580C" stroke="#fff" stroke-width="3"/><text x="24" y="29" text-anchor="middle" font-family="Arial,sans-serif" font-size="14" font-weight="700" fill="#fff">${group.length}</text></svg>`;
+          const marker = new maps.Marker({ map: gMap, position: centerPosition, title: `${group.length} online food carts`, icon: { url: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`, scaledSize: new maps.Size(48, 48), anchor: new maps.Point(24, 24) }, zIndex: 500 });
+          marker.addListener('click', () => { gMap.panTo(centerPosition); gMap.setZoom(Math.min(21, zoomLevel + 2)); });
+          markersRef.current.push(marker);
+        }
+        return;
+      }
+
+      // At the local 250 m view, separate close carts into a stable ring while preserving their true locations.
+      const radius = Math.max(34, Math.min(72, 25 + group.length * 4));
+      group.forEach((point, index) => {
+        const angle = (2 * Math.PI * index) / group.length - Math.PI / 2;
+        const displayPixel = { x: centerPixel.x + Math.cos(angle) * radius, y: centerPixel.y + Math.sin(angle) * radius };
+        const displayPosition = pointPosition(displayPixel, zoomLevel);
+        if (typeof maps?.Polyline === 'function') {
+          spiderLinesRef.current.push(new maps.Polyline({ map: gMap, path: [point.position, displayPosition], strokeColor: '#78716C', strokeOpacity: 0.65, strokeWeight: 1, clickable: false, zIndex: 4 }));
+        }
+        addMarker(point.vendor, displayPosition, ' (nearby cart)');
+      });
     });
-  }, [mapLoaded, vendors, selectedVendor, onSelectVendor]);
+  }, [mapLoaded, vendors, selectedVendor, onSelectVendor, mapZoom, mapViewportVersion]);
 
   // Update Blue User Location Marker & Accuracy Circle
   useEffect(() => {
@@ -358,38 +499,20 @@ export const VendorMap: React.FC<VendorMapProps> = ({
     }
   }, [mapLoaded, locationState.coords, locationState.accuracy, locationState.heading]);
 
-  // Fit vendor data initially when GPS is unavailable, then focus the first credible GPS fix.
+  // Center once on the first actual device fix; subsequent vendor snapshots never move or zoom the map.
   useEffect(() => {
     const gMap = googleMapInstanceRef.current;
     if (!mapLoaded || !gMap || !locationState.coords) return;
-    if (locationState.accuracy !== null && locationState.accuracy <= 1000 && !hasCenteredOnGpsRef.current) {
+    if (!hasCenteredOnGpsRef.current) {
       gMap.panTo(locationState.coords);
-      gMap.setZoom(14);
+      const preferredZoom = preferredZoomFor250mRange(locationState.coords.lat, mapRef.current?.clientWidth || 390);
+      gMap.setZoom(preferredZoom);
+      setMapZoom(preferredZoom);
       hasCenteredOnGpsRef.current = true;
-      hasInitialVendorViewportRef.current = true;
     } else if (followUserRef.current) {
       gMap.panTo(locationState.coords);
     }
-  }, [mapLoaded, locationState.coords, locationState.timestamp, locationState.accuracy]);
-
-  useEffect(() => {
-    const gMap = googleMapInstanceRef.current;
-    if (!mapLoaded || !gMap || hasInitialVendorViewportRef.current) return;
-    if (locationState.coords && locationState.accuracy !== null && locationState.accuracy <= 1000) return;
-
-    const validVendors = vendors.filter((vendor) =>
-      Number.isFinite(vendor.location?.lat) && Number.isFinite(vendor.location?.lng)
-    );
-    if (validVendors.length === 0) return;
-
-    const maps = (window as any).google?.maps;
-    if (!maps?.LatLngBounds) return;
-    const bounds = new maps.LatLngBounds();
-    validVendors.forEach((vendor) => bounds.extend(vendor.location));
-    gMap.fitBounds(bounds, 48);
-    if (validVendors.length === 1) gMap.setZoom(13);
-    hasInitialVendorViewportRef.current = true;
-  }, [mapLoaded, vendors, locationState.coords, locationState.accuracy]);
+  }, [mapLoaded, locationState.coords]);
 
   useEffect(() => {
     if (!gpsActive) followUserRef.current = false;
@@ -400,15 +523,26 @@ export const VendorMap: React.FC<VendorMapProps> = ({
   }, [locationState.status]);
 
   // Handle Recenter My Location with High Accuracy GPS
-  const handleRecenterLocation = () => {
+  const handleRecenterLocation = async () => {
     followUserRef.current = true;
     setIsLocating(true);
-    if (locationState.coords && googleMapInstanceRef.current) {
-      googleMapInstanceRef.current.panTo(locationState.coords);
-      googleMapInstanceRef.current.setZoom(15);
+    try {
+      const fix = await locationService.getCurrentPosition(true);
+      const coords = fix.coords;
+      if (!coords || !Number.isFinite(coords.lat) || !Number.isFinite(coords.lng)) return;
+      if (googleMapInstanceRef.current) {
+        googleMapInstanceRef.current.panTo(coords);
+        const preferredZoom = preferredZoomFor250mRange(coords.lat, mapRef.current?.clientWidth || 390);
+        googleMapInstanceRef.current.setZoom(preferredZoom);
+        setMapZoom(preferredZoom);
+      }
+      locationService.startTracking();
+      hasCenteredOnGpsRef.current = true;
+    } catch {
+      // The location service publishes a readable GPS error for the accuracy panel.
+    } finally {
       setIsLocating(false);
     }
-    locationService.startTracking();
   };
 
   // Compute live distance & travel times between user GPS and selected vendor
@@ -491,6 +625,12 @@ export const VendorMap: React.FC<VendorMapProps> = ({
         </button>
       </div>
 
+      {locationError && (
+        <div role="status" className="absolute left-4 right-16 top-16 z-20 max-w-md rounded-xl border border-amber-200 bg-white/95 px-3 py-2 text-[11px] leading-snug text-amber-900 shadow-md dark:border-amber-900 dark:bg-stone-950/95 dark:text-amber-200">
+          {locationError}
+        </div>
+      )}
+
       {/* Floating Controls: Recenter My Location & Refresh */}
       <div className="absolute right-4 top-4 z-20 flex flex-col gap-2">
         <button
@@ -561,8 +701,9 @@ export const VendorMap: React.FC<VendorMapProps> = ({
 
       {/* Selected Vendor Drawer / Card Overlay with Live Distance */}
       {showCardOverlay && selectedVendor && (
-        <div className="absolute bottom-4 left-4 right-4 md:left-auto md:right-4 md:w-96 z-30 animate-fade-in-up">
+        <div className="absolute bottom-4 left-4 right-20 md:left-4 md:right-auto md:w-96 z-30 animate-fade-in-up">
           <div className="bg-white dark:bg-stone-900 rounded-3xl p-4 shadow-2xl border border-stone-200 dark:border-stone-800 flex gap-3.5 items-center relative text-stone-900 dark:text-stone-100">
+            <button type="button" aria-label="Close vendor details" onClick={() => onSelectVendor(null)} className="absolute -top-2 -right-2 z-10 flex h-7 w-7 items-center justify-center rounded-full bg-stone-900 text-white shadow">×</button>
             <img
               src={selectedVendor.bannerImage || selectedVendor.photos[0]}
               alt={selectedVendor.shopName}
@@ -603,7 +744,7 @@ export const VendorMap: React.FC<VendorMapProps> = ({
                 <span>{selectedVendor.address}</span>
               </p>
               {selectedVendor.gpsAccuracy !== undefined && (
-                <p className="text-[10px] text-stone-500 mt-0.5">GPS ±{selectedVendor.gpsAccuracy} m · Updated {selectedVendor.lastLocationAt ? new Date(selectedVendor.lastLocationAt).toLocaleTimeString() : 'time unavailable'}</p>
+                <p className="text-[10px] text-stone-500 mt-0.5">GPS ±{selectedVendor.gpsAccuracy} m · {isVendorLocationFresh(selectedVendor, freshnessNow) ? 'Recent' : 'Stale'} location · Updated {selectedVendor.locationUpdatedAt || selectedVendor.lastLocationAt ? new Date(selectedVendor.locationUpdatedAt || selectedVendor.lastLocationAt || '').toLocaleTimeString() : 'time unavailable'}</p>
               )}
 
               <div className="flex items-center justify-between mt-2 pt-2 border-t border-stone-100 dark:border-stone-800">

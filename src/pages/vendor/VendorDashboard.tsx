@@ -1,13 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { vendorService, isCurrentOnlineVendor } from '../../services/vendorService';
+import { vendorService, isVendorLocationFresh } from '../../services/vendorService';
 import { reviewService } from '../../services/reviewService';
 import { Vendor, Review } from '../../types';
 import { storageService } from '../../services/storageService';
 import { locationService, LocationState } from '../../services/locationService';
 import { getVendorCoverImage, STALL_PLACEHOLDER_IMAGE } from '../../data/foodImages';
-import { isFirebaseRealtimeDatabaseConfigured } from '../../services/firebase';
 import {
   Store,
   Clock,
@@ -42,6 +41,7 @@ export const VendorDashboard: React.FC = () => {
   const [toggleNotice, setToggleNotice] = useState('');
   const [locationError, setLocationError] = useState('');
   const [startingGps, setStartingGps] = useState(false);
+  const [freshnessNow, setFreshnessNow] = useState(Date.now());
   const locationUnsubscribeRef = useRef<(() => void) | null>(null);
   const locationWriteRef = useRef<Promise<void> | null>(null);
   const lastLocationWriteRef = useRef<{ lat: number; lng: number; at: number } | null>(null);
@@ -59,7 +59,6 @@ export const VendorDashboard: React.FC = () => {
       let currentVendor = await vendorService.getVendorByOwnerUid(userProfile.uid);
 
       if (currentVendor) {
-        if (!isCurrentOnlineVendor(currentVendor)) currentVendor = { ...currentVendor, isOnline: false, locationAvailable: false };
         setVendor(currentVendor);
         const revs = await reviewService.getReviewsByVendorId(currentVendor.id);
         setReviews(revs);
@@ -79,6 +78,12 @@ export const VendorDashboard: React.FC = () => {
     gpsSessionRef.current += 1;
     locationUnsubscribeRef.current?.();
     locationService.stopTracking();
+  }, []);
+
+  // Refresh the GPS freshness label only; this never changes vendor availability.
+  useEffect(() => {
+    const timer = window.setInterval(() => setFreshnessNow(Date.now()), 15_000);
+    return () => window.clearInterval(timer);
   }, []);
 
   // LIVE OPEN / CLOSED TOGGLE
@@ -146,7 +151,9 @@ export const VendorDashboard: React.FC = () => {
             gpsAccuracy: location.accuracy!,
             locationAvailable: true,
             isOnline: true,
-            lastLocationAt: new Date().toISOString()
+            availabilityStatus: 'online',
+            lastLocationAt: new Date().toISOString(),
+            locationUpdatedAt: new Date().toISOString()
           } : current);
         })
         .catch(error => {
@@ -173,7 +180,7 @@ export const VendorDashboard: React.FC = () => {
       await locationWriteRef.current?.catch(() => undefined);
       locationWriteRef.current = null;
       await vendorService.setVendorOffline(vendor.id, userProfile.uid);
-      setVendor(current => current ? { ...current, isOnline: false, locationAvailable: false } : current);
+      setVendor(current => current ? { ...current, isOnline: false, availabilityStatus: 'offline', locationAvailable: false } : current);
       setToggleNotice('You are offline. Your stall remains registered and approved.');
     } catch (error) {
       setLocationError(error instanceof Error ? error.message : 'Could not go offline.');
@@ -191,16 +198,6 @@ export const VendorDashboard: React.FC = () => {
     const file = e.target.files?.[0];
     if (!file || !vendor || !userProfile) return;
 
-    if (!file.type.startsWith('image/')) {
-      setCoverError('Please select a valid image file (JPEG, PNG, WebP).');
-      return;
-    }
-
-    if (file.size > 10 * 1024 * 1024) {
-      setCoverError('Image file size must be under 10MB.');
-      return;
-    }
-
     setUploadingCover(true);
     setCoverError('');
     setCoverNotice('');
@@ -209,7 +206,7 @@ export const VendorDashboard: React.FC = () => {
       // 1. Upload to Firebase Storage
       const downloadUrl = await storageService.uploadImage(
         file,
-        `vendors/${userProfile.uid}/cover_${Date.now()}.jpg`
+        `vendors/${userProfile.uid}/${vendor.id}/cover_${Date.now()}.jpg`
       );
 
       // 2. Update coverImageUrl and bannerImage in Firestore
@@ -396,24 +393,27 @@ export const VendorDashboard: React.FC = () => {
                 : 'Go online only after you are at your cart. ChatMaps requests your device GPS and publishes the stall after a valid fix.'}
             </p>
             {vendor.status !== 'approved' && <p className="text-xs font-semibold text-amber-700">Admin approval is required before this cart can go online.</p>}
-            <p className="text-[11px] text-stone-500">Mobile browsers may pause GPS when this page is backgrounded. Stale locations are hidden from live maps.</p>
-            {!isFirebaseRealtimeDatabaseConfigured() && <p className="text-[11px] text-amber-700">Automatic disconnect presence is not configured. If the browser closes unexpectedly, the map hides this location after its 2 minute freshness window; use GO OFFLINE when possible.</p>}
+            <p className="text-[11px] text-stone-500">Mobile browsers may pause GPS when this page is backgrounded. A stale last location does not change your online status.</p>
+            {vendor.isOnline && <p className="text-[11px] text-amber-700">Availability stays online until you choose GO OFFLINE. GPS updates stop if this page or browser is closed. Last location: {vendor.lastLocationAt ? `${new Date(vendor.lastLocationAt).toLocaleString()} (${isVendorLocationFresh(vendor, freshnessNow) ? 'recent' : 'stale'})` : 'not available'}.</p>}
           </div>
 
-          <button
-            onClick={vendor.isOnline ? handleGoOffline : handleGoOnline}
-            disabled={togglingStatus || startingGps || (!vendor.isOnline && vendor.status !== 'approved')}
-            className={`px-6 py-3.5 rounded-2xl font-black text-sm shadow-lg flex items-center justify-center gap-2.5 transition active:scale-95 ${
-              vendor.isOnline
-                ? 'bg-rose-600 hover:bg-rose-700 text-white shadow-rose-600/30'
-                : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-600/30'
-            }`}
-          >
-            <Power className="w-4 h-4" />
-            <span>
-              {startingGps ? 'Finding GPS…' : togglingStatus ? 'Updating…' : vendor.isOnline ? 'GO OFFLINE' : 'GO ONLINE'}
-            </span>
-          </button>
+          <div className="flex flex-col gap-2">
+            <button
+              onClick={vendor.isOnline ? handleGoOffline : handleGoOnline}
+              disabled={togglingStatus || startingGps || (!vendor.isOnline && vendor.status !== 'approved')}
+              className={`px-6 py-3.5 rounded-2xl font-black text-sm shadow-lg flex items-center justify-center gap-2.5 transition active:scale-95 ${
+                vendor.isOnline
+                  ? 'bg-rose-600 hover:bg-rose-700 text-white shadow-rose-600/30'
+                  : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-600/30'
+              }`}
+            >
+              <Power className="w-4 h-4" />
+              <span>
+                {startingGps ? 'Finding GPS…' : togglingStatus ? 'Updating…' : vendor.isOnline ? 'GO OFFLINE' : 'GO ONLINE'}
+              </span>
+            </button>
+            {vendor.isOnline && !isVendorLocationFresh(vendor, freshnessNow) && <button type="button" onClick={handleGoOnline} disabled={startingGps || togglingStatus} className="rounded-xl border border-orange-300 px-3 py-2 text-xs font-bold text-orange-700 disabled:opacity-50">{startingGps ? 'Finding GPS…' : 'Resume GPS updates'}</button>}
+          </div>
         </div>
 
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-stone-300/70 pt-4">
@@ -460,7 +460,7 @@ export const VendorDashboard: React.FC = () => {
               <span>{uploadingCover ? 'Uploading to Cloud...' : vendor.coverImageUrl ? 'Replace Cover Photo' : 'Upload Cover Photo'}</span>
               <input
                 type="file"
-                accept="image/*"
+                accept="image/jpeg,image/png,image/webp,image/gif,image/avif"
                 onChange={handleCoverUpload}
                 disabled={uploadingCover}
                 className="hidden"

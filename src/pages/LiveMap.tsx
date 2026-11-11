@@ -24,7 +24,7 @@ export const LiveMap: React.FC = () => {
   useEffect(() => {
     const unsubscribe = vendorService.subscribeToApprovedVendors((list) => {
       setVendors(list);
-      setSelectedVendor(current => list.find(vendor => vendor.id === current?.id) || list[0] || null);
+      setSelectedVendor(current => list.find(vendor => vendor.id === current?.id) || null);
       setLoadError(null);
     }, error => {
       setVendors([]);
@@ -52,10 +52,14 @@ export const LiveMap: React.FC = () => {
     return true;
   });
 
+  useEffect(() => {
+    setSelectedVendor(current => current && filteredVendors.some(vendor => vendor.id === current.id) ? current : null);
+  }, [vendors, searchQuery, selectedCategory, openNowOnly]);
+
   return (
-    <div className="relative flex h-[calc(100dvh-10rem)] min-h-[32rem] w-full flex-1 flex-col overflow-hidden md:h-[calc(100dvh-8rem)] xl:h-[calc(100dvh-4rem)]">
+    <div className="relative flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden">
       {loadError && <div role="alert" className="absolute bottom-4 left-4 right-4 z-40 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">{loadError}</div>}
-      {!loadError && filteredVendors.length === 0 && <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none"><div className="rounded-2xl border border-stone-200 bg-white/95 p-5 text-center shadow-xl"><MapPin className="w-7 h-7 text-stone-400 mx-auto mb-2"/><p className="text-sm font-bold text-stone-800">No vendors are currently online</p><p className="text-xs text-stone-500 mt-1">Approved carts appear when vendors share a fresh device location.</p></div></div>}
+      {!loadError && filteredVendors.length === 0 && <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none"><div className="rounded-2xl border border-stone-200 bg-white/95 p-5 text-center shadow-xl"><MapPin className="w-7 h-7 text-stone-400 mx-auto mb-2"/><p className="text-sm font-bold text-stone-800">No vendors are currently online</p><p className="text-xs text-stone-500 mt-1">Approved vendors appear here after they go online with a valid device location.</p></div></div>}
       {/* Floating Controls Bar at Top */}
       <div className="absolute top-4 left-4 right-4 z-20 pointer-events-none flex flex-col gap-2 max-w-2xl mx-auto">
         <div className="bg-white/95 backdrop-blur-md rounded-2xl p-2 shadow-xl border border-stone-200 pointer-events-auto flex items-center gap-2">
@@ -120,8 +124,8 @@ export const LiveMap: React.FC = () => {
         <VendorMap
           vendors={filteredVendors}
           selectedVendor={selectedVendor}
-          onSelectVendor={(v) => setSelectedVendor(v)}
-          className="h-full min-h-[32rem] w-full rounded-none"
+          onSelectVendor={setSelectedVendor}
+          className="h-full min-h-0 w-full rounded-none"
           showCardOverlay={true}
         />
       </div>

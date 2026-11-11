@@ -48,7 +48,7 @@ export const CustomerLogin: React.FC = () => {
     try {
       const profile = await loginWithGoogle('customer');
       if (!profile) return;
-      navigate('/customer/dashboard');
+      navigate(profile.role === 'vendor' ? '/vendor/dashboard' : profile.role === 'admin' ? '/admin/dashboard' : '/');
     } catch (err: any) {
       setError(err.message || 'Google sign-in failed.');
     } finally {

@@ -102,10 +102,10 @@ export const VendorProfile: React.FC = () => {
     setUploadingImage(true);
     setErrorMsg('');
     try {
-      const url = await storageService.uploadImage(file, `vendors/${userProfile.uid}/banner_${Date.now()}.jpg`);
+      const url = await storageService.uploadImage(file, `vendors/${userProfile.uid}/${vendor.id}/banner_${Date.now()}.jpg`);
       setBannerImage(url);
     } catch (err) {
-      setErrorMsg('Image upload failed.');
+      setErrorMsg(err instanceof Error ? err.message : 'Image upload failed.');
     } finally {
       setUploadingImage(false);
     }
@@ -119,10 +119,10 @@ export const VendorProfile: React.FC = () => {
     setUploadingImage(true);
     setErrorMsg('');
     try {
-      const url = await storageService.uploadImage(file, `vendors/${userProfile.uid}/food_${Date.now()}.jpg`);
+      const url = await storageService.uploadImage(file, `vendors/${userProfile.uid}/${vendor.id}/food_${Date.now()}.jpg`);
       setPhotos([...photos, url]);
     } catch (err) {
-      setErrorMsg('Image upload failed.');
+      setErrorMsg(err instanceof Error ? err.message : 'Image upload failed.');
     } finally {
       setUploadingImage(false);
     }
@@ -285,7 +285,7 @@ export const VendorProfile: React.FC = () => {
                   <span>{uploadingImage ? 'Uploading...' : 'Replace Banner Photo'}</span>
                   <input
                     type="file"
-                    accept="image/*"
+                    accept="image/jpeg,image/png,image/webp,image/gif,image/avif"
                     onChange={handleBannerUpload}
                     className="hidden"
                   />
@@ -304,7 +304,7 @@ export const VendorProfile: React.FC = () => {
                   <span>Upload Photo</span>
                   <input
                     type="file"
-                    accept="image/*"
+                    accept="image/jpeg,image/png,image/webp,image/gif,image/avif"
                     onChange={handleGalleryUpload}
                     className="hidden"
                   />

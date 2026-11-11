@@ -205,6 +205,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [isDetectingLocation, setIsDetectingLocation] = useState(false);
   const [gpsActive, setGpsActive] = useState<boolean>(false);
   const gpsTrackingRef = useRef(false);
+  const manualCitySelectedRef = useRef(locationSource === 'manual');
+  const lastSuccessfulGeocodeCoordinatesRef = useRef<GpsCoordinates | null>(null);
+  const gpsCityAvailableRef = useRef(false);
   const geocodeInProgressRef = useRef(false);
   const locationRequestInProgressRef = useRef(false);
   const lastCityGeocodeRef = useRef<{ coordinates: GpsCoordinates; at: number } | null>(null);
@@ -255,6 +258,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSelectedLocality(null);
     setCustomerCoordinates(null);
     setLocationSource('manual');
+    manualCitySelectedRef.current = true;
+    gpsCityAvailableRef.current = false;
     setLocationError(null);
     try {
       localStorage.setItem('chatmaps_selected_city', cleanCity);
@@ -272,6 +277,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSelectedLocality(null);
     setCustomerCoordinates(null);
     setLocationSource('unknown');
+    manualCitySelectedRef.current = false;
+    gpsCityAvailableRef.current = false;
     setLocationError(null);
     try {
       localStorage.removeItem('chatmaps_selected_city');
@@ -280,6 +287,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, []);
 
   const applyGpsCity = useCallback(async (coordinates: GpsCoordinates, generation = locationSelectionGenerationRef.current): Promise<boolean> => {
+    const previous = lastSuccessfulGeocodeCoordinatesRef.current;
+    if (gpsCityAvailableRef.current && previous && locationService.calculateDistanceMeters(previous.lat, previous.lng, coordinates.lat, coordinates.lng) < 100) return true;
     if (geocodeInProgressRef.current) return false;
     geocodeInProgressRef.current = true;
     try {
@@ -289,6 +298,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setSelectedState(address.state);
       setSelectedLocality(address.locality);
       setLocationSource('gps');
+      manualCitySelectedRef.current = false;
+      lastSuccessfulGeocodeCoordinatesRef.current = coordinates;
+      gpsCityAvailableRef.current = true;
       setLocationError(null);
       // Google geocoding content is intentionally kept in memory only.
       try {
@@ -299,7 +311,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } catch (error) {
       if (generation === locationSelectionGenerationRef.current) {
         setLocationError(error instanceof Error ? error.message : 'Could not identify your city. Select it manually.');
-        setLocationSource(current => current === 'manual' ? current : 'unavailable');
+        if (!manualCitySelectedRef.current) {
+          setSelectedCity('');
+          setSelectedState(null);
+          setSelectedLocality(null);
+          setLocationSource('unavailable');
+          gpsCityAvailableRef.current = false;
+        }
       }
       return false;
     } finally {
@@ -318,14 +336,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!fix.coords || !Number.isFinite(fix.coords.lat) || !Number.isFinite(fix.coords.lng)) {
         throw new Error('Your device did not return valid coordinates. Select your city manually.');
       }
+      setCustomerCoordinates(fix.coords);
       if (fix.accuracy === null || fix.accuracy > 1000) {
         throw new Error(`GPS accuracy is too low to identify your city (±${fix.accuracy ?? 'unknown'}m). Try again outdoors or select your city manually.`);
       }
-      setCustomerCoordinates(fix.coords);
       lastCityGeocodeRef.current = { coordinates: fix.coords, at: Date.now() };
       return await applyGpsCity(fix.coords, generation);
     } catch (error) {
-      setLocationSource(current => current === 'manual' ? current : 'unavailable');
+      if (!manualCitySelectedRef.current) {
+        setSelectedCity('');
+        setSelectedState(null);
+        setSelectedLocality(null);
+        setLocationSource('unavailable');
+        gpsCityAvailableRef.current = false;
+      }
       setLocationError(error instanceof Error ? error.message : 'Location is unavailable. Select your city manually.');
       return false;
     } finally {
@@ -372,6 +396,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     lastCityGeocodeRef.current = null;
     setLocationError(null);
     setLocationSource('gps');
+    manualCitySelectedRef.current = false;
+    gpsCityAvailableRef.current = false;
     setSelectedCity('');
     setSelectedState(null);
     setSelectedLocality(null);

@@ -25,18 +25,16 @@ const requireDb = () => {
 const mapVendor = (id: string, data: Record<string, any>): Vendor => ({ ...data, id } as Vendor);
 const mapUser = (id: string, data: Record<string, any>): UserProfile => ({ ...data, uid: data.uid || id } as UserProfile);
 
-export const LIVE_LOCATION_MAX_AGE_MS = 120_000;
 export const LIVE_LOCATION_MAX_ACCURACY_METERS = 100;
 
-export const isVendorLocationCurrent = (vendor: Vendor, now = Date.now()): boolean => {
-  const updatedAt = vendor.lastLocationAt ? Date.parse(vendor.lastLocationAt) : NaN;
+export const isVendorLocationCurrent = (vendor: Vendor): boolean => {
   return vendor.status === 'approved' && vendor.isOnline === true &&
+    (vendor.availabilityStatus === undefined || vendor.availabilityStatus === 'online') &&
     vendor.locationAvailable === true &&
-    Number.isFinite(vendor.location?.lat) &&
-    Number.isFinite(vendor.location?.lng) &&
+    Number.isFinite(vendor.location?.lat) && vendor.location!.lat >= -90 && vendor.location!.lat <= 90 &&
+    Number.isFinite(vendor.location?.lng) && vendor.location!.lng >= -180 && vendor.location!.lng <= 180 &&
     Number.isFinite(vendor.gpsAccuracy) &&
-    (vendor.gpsAccuracy as number) <= LIVE_LOCATION_MAX_ACCURACY_METERS &&
-    Number.isFinite(updatedAt) && now - updatedAt >= 0 && now - updatedAt <= LIVE_LOCATION_MAX_AGE_MS;
+    (vendor.gpsAccuracy as number) <= LIVE_LOCATION_MAX_ACCURACY_METERS;
 };
 
 export interface AdminStats {
@@ -138,8 +136,6 @@ export const adminService = {
     await updateDoc(vendorRef, {
       status: 'approved',
       statusHistory: arrayUnion({ from: 'pending', to: 'approved', at, actorUid: auth?.currentUser?.uid || '' }),
-      isOnline: false,
-      locationAvailable: false,
       rejectionReason: deleteField(),
       updatedAt: new Date().toISOString()
     });
@@ -155,8 +151,6 @@ export const adminService = {
     await updateDoc(vendorRef, {
       status: 'rejected',
       statusHistory: arrayUnion({ from: 'pending', to: 'rejected', at, actorUid: auth?.currentUser?.uid || '' }),
-      isOnline: false,
-      locationAvailable: false,
       rejectionReason: reason.trim(),
       updatedAt: new Date().toISOString()
     });
@@ -172,8 +166,6 @@ export const adminService = {
     await updateDoc(vendorRef, {
       status,
       statusHistory: arrayUnion({ from: previousStatus, to: status, at, actorUid: auth?.currentUser?.uid || '' }),
-      isOnline: false,
-      locationAvailable: false,
       updatedAt: new Date().toISOString()
     });
   },
@@ -194,8 +186,6 @@ export const adminService = {
         status: 'suspended',
         statusHistory: arrayUnion({ from: String(vendor.status), to: 'suspended', at, actorUid: auth?.currentUser?.uid || '' }),
         preSuspensionStatus: vendor.status,
-        isOnline: false,
-        locationAvailable: false,
         updatedAt: new Date().toISOString()
       });
     }

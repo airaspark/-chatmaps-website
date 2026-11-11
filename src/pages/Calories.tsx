@@ -42,9 +42,11 @@ import {
 } from '../data/streetFoodCalories';
 import { locationService, LocationState } from '../services/locationService';
 import { useApp } from '../context/AppContext';
+import { useAuth } from '../context/AuthContext';
 
 export const Calories: React.FC = () => {
   const { t } = useApp();
+  const { userProfile, loading: authLoading } = useAuth();
   const [summary, setSummary] = useState<DailyActivitySummary>(() => calorieService.getTodaySummary());
   const [walkingSession, setWalkingSession] = useState<WalkingSession | null>(() => calorieService.getActiveWalkingSession());
   const [searchTerm, setSearchTerm] = useState('');
@@ -103,6 +105,13 @@ export const Calories: React.FC = () => {
       unsubGps();
     };
   }, [walkingSession?.isActive, walkingSession?.isPaused]);
+
+  useEffect(() => {
+    if (authLoading) return;
+    setSummary(calorieService.getTodaySummary());
+    setWalkingSession(calorieService.getActiveWalkingSession());
+    void calorieService.fetchAndMergeFromFirestore().then(() => setSummary(calorieService.getTodaySummary()));
+  }, [authLoading, userProfile?.uid]);
 
   // Draw walking breadcrumb route on canvas
   useEffect(() => {
@@ -260,14 +269,14 @@ export const Calories: React.FC = () => {
   const handleStartWalk = async () => {
     try {
       const loc = await locationService.getCurrentPosition(true);
+      if (!loc.coords || !Number.isFinite(loc.coords.lat) || !Number.isFinite(loc.coords.lng)) {
+        throw new Error('A valid GPS fix was not returned.');
+      }
       locationService.startTracking();
-      calorieService.startWalking(loc.coords || undefined);
+      calorieService.startWalking(loc.coords || undefined, userProfile?.weightKg);
       showToast('Walking tracker started with High Accuracy GPS!');
     } catch {
-      // Start anyway with local timer
-      locationService.startTracking();
-      calorieService.startWalking();
-      showToast('Walking tracker started!');
+      showToast('GPS location is unavailable. Allow location access and try starting the walk again.');
     }
   };
 
@@ -277,8 +286,9 @@ export const Calories: React.FC = () => {
   };
 
   const handleResumeWalk = () => {
+    locationService.startTracking();
     calorieService.resumeWalking();
-    showToast('Walking resumed');
+    showToast('Walking resumed. GPS will update when the device provides a fix.');
   };
 
   const handleStopWalk = () => {
@@ -337,7 +347,7 @@ export const Calories: React.FC = () => {
               Calories & Walking Tracker
             </h1>
             <p className="text-xs sm:text-sm text-orange-100 mt-1 max-w-xl">
-              Enjoy your favourite chaats, dosas, and rolls while balancing your intake with live GPS walking burn.
+              Track food intake and GPS-measured walks; food nutrition and exercise output are estimates.
             </p>
           </div>
 
@@ -356,6 +366,7 @@ export const Calories: React.FC = () => {
       </div>
 
       <div className="max-w-4xl mx-auto px-4 md:px-8 pt-5 space-y-6">
+        <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">Nutrition values are approximate estimates for the listed serving; recipes and portions vary. Exercise calories and GPS-derived steps are estimates. Exercise is shown separately and does not reduce your food goal.</p>
         {/* ========================================================
             1. DAILY SUMMARY METRICS (Responsive Cards on Phone & Tablet)
             ======================================================== */}
@@ -407,7 +418,7 @@ export const Calories: React.FC = () => {
               <span className="text-[11px] text-stone-400 font-bold ml-1">km</span>
             </div>
             <div className="text-[10px] text-stone-400 font-medium mt-1">
-              {summary.totalSteps.toLocaleString()} steps
+              {summary.totalSteps.toLocaleString()} estimated steps
             </div>
           </div>
 
@@ -424,7 +435,7 @@ export const Calories: React.FC = () => {
               <span className="text-[11px] text-stone-400 font-bold ml-1">kcal</span>
             </div>
             <div className="text-[10px] text-stone-400 font-medium mt-1">
-              Net: {summary.netCalories} kcal
+              Food intake: {summary.netCalories} kcal
             </div>
           </div>
         </div>
@@ -495,7 +506,7 @@ export const Calories: React.FC = () => {
                   Live Walking Tracker
                 </h3>
                 <p className="text-[11px] text-stone-400">
-                  Burns off street food carbs with real-time GPS distance
+                  GPS-measured distance · estimated steps and calories
                 </p>
               </div>
             </div>
@@ -517,6 +528,8 @@ export const Calories: React.FC = () => {
             )}
           </div>
 
+          <p className="text-[11px] text-stone-500">This website cannot read your phone’s native step counter. Step count is estimated from GPS distance; calorie burn is an estimate using walking speed and {userProfile?.weightKg ? 'your saved weight' : 'an assumed 70 kg body weight'}.</p>
+
           {/* Active Walk Dashboard Display */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-stone-50 dark:bg-stone-800/60 p-4 rounded-2xl border border-stone-200/80 dark:border-stone-700/60 text-center">
             <div>
@@ -533,7 +546,7 @@ export const Calories: React.FC = () => {
               </span>
             </div>
             <div>
-              <span className="text-[10px] uppercase font-bold text-stone-400 block">Steps</span>
+              <span className="text-[10px] uppercase font-bold text-stone-400 block">Est. steps</span>
               <span className="font-mono text-xl sm:text-2xl font-black text-blue-600 dark:text-blue-400">
                 {walkingSession ? walkingSession.steps.toLocaleString() : '0'}
               </span>
@@ -555,7 +568,7 @@ export const Calories: React.FC = () => {
                   <Compass className="w-3.5 h-3.5 text-orange-600" />
                   <span>GPS Route Path ({walkingSession.route.length} waypoints)</span>
                 </span>
-                <span className="text-emerald-600">● Live GPS</span>
+                <span className="text-emerald-600">● GPS updates</span>
               </div>
               <canvas
                 ref={canvasRef}

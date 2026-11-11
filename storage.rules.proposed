@@ -1,0 +1,81 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isTargetBucket() {
+      return bucket == 'chatmap-1eacb.firebasestorage.app';
+    }
+
+    function vendorPath(vendorId) {
+      return /databases/(default)/documents/vendors/$(vendorId);
+    }
+
+    function userPath(uid) {
+      return /databases/(default)/documents/users/$(uid);
+    }
+
+    function adminPath(uid) {
+      return /databases/(default)/documents/admins/$(uid);
+    }
+
+    function isApprovedVendor(vendorId, ownerUid) {
+      return firestore.exists(vendorPath(vendorId)) &&
+        firestore.get(vendorPath(vendorId)).data.ownerUid == ownerUid &&
+        firestore.get(vendorPath(vendorId)).data.status == 'approved';
+    }
+
+    function isApprovedVendorOwner(ownerUid, vendorId) {
+      return request.auth != null &&
+        request.auth.uid == ownerUid &&
+        isApprovedVendor(vendorId, ownerUid);
+    }
+
+    function isAuthorizedAdmin() {
+      return request.auth != null && (
+        (firestore.exists(adminPath(request.auth.uid)) &&
+          firestore.get(adminPath(request.auth.uid)).data.role == 'admin' &&
+          firestore.get(adminPath(request.auth.uid)).data.status == 'active') ||
+        (firestore.exists(userPath(request.auth.uid)) &&
+          firestore.get(userPath(request.auth.uid)).data.role == 'admin' &&
+          firestore.get(userPath(request.auth.uid)).data.status == 'active')
+      );
+    }
+
+    function validImageUpload() {
+      return request.resource != null &&
+        request.resource.contentType.matches('image/(jpeg|png|webp|gif|avif)') &&
+        request.resource.size <= 5 * 1024 * 1024;
+    }
+
+    // Vendor files are keyed by both the signed-in owner UID and the existing
+    // Firestore vendor document ID: vendors/{ownerUid}/{vendorId}/{file...}
+    match /vendors/{ownerUid}/{vendorId}/{allPaths=**} {
+      // Vendor photos become customer-readable only after the vendor is approved.
+      allow read: if isTargetBucket() && request.auth != null && isApprovedVendor(vendorId, ownerUid);
+
+      // Only the owner of an approved vendor, or an authorized admin,
+      // may create or replace image objects.
+      allow create, update: if isTargetBucket() && ((
+          request.auth != null && request.auth.uid == ownerUid &&
+          isApprovedVendorOwner(ownerUid, vendorId) && validImageUpload()
+        ) || (isAuthorizedAdmin() && validImageUpload()));
+
+      allow delete: if isTargetBucket() && ((
+          request.auth != null && request.auth.uid == ownerUid &&
+          isApprovedVendorOwner(ownerUid, vendorId)
+        ) || isAuthorizedAdmin());
+    }
+
+    // Existing customer profile-photo upload path: profiles/{uid}/avatar.jpg.
+    match /profiles/{userId}/avatar.jpg {
+      allow read: if isTargetBucket();
+      allow create, update: if isTargetBucket() && request.auth != null &&
+        request.auth.uid == userId && validImageUpload();
+      allow delete: if false;
+    }
+
+    // Deny all unrecognized paths and unauthenticated access.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

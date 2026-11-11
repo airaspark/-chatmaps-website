@@ -75,7 +75,22 @@ const getOrCreateGoogleProfile = async (
   firestore: NonNullable<typeof db>
 ): Promise<UserProfile> => runTransaction(firestore, async (transaction) => {
   const userDocRef = doc(firestore, 'users', user.uid);
+  const adminDocRef = doc(firestore, 'admins', user.uid);
   const userDoc = await transaction.get(userDocRef);
+  const adminDoc = await transaction.get(adminDocRef);
+
+  if (adminDoc.exists() && adminDoc.data().role === 'admin') {
+    if (adminDoc.data().status !== 'active') throw new Error('This administrator account is not active.');
+    return {
+      uid: user.uid,
+      email: user.email || '',
+      displayName: adminDoc.data().displayName || user.displayName || 'Administrator',
+      photoURL: user.photoURL || '',
+      role: 'admin',
+      status: 'active',
+      createdAt: String(adminDoc.data().createdAt || new Date().toISOString())
+    };
+  }
 
   if (userDoc.exists()) {
     const profile = userDoc.data() as UserProfile;
@@ -98,13 +113,15 @@ const getOrCreateGoogleProfile = async (
     email: user.email || '',
     displayName: user.displayName || 'Foodie',
     role: requestedRole,
-    photoURL: user.photoURL || undefined,
+    status: 'active',
+    photoURL: user.photoURL || '',
     termsAccepted: true,
     privacyPolicyAccepted: true,
     termsAcceptedAt: consentTimestamp,
     termsVersion: '2025-02-15',
     privacyPolicyVersion: '2025-02-15',
-    createdAt: consentTimestamp
+    createdAt: consentTimestamp,
+    updatedAt: consentTimestamp
   };
   transaction.set(userDocRef, profile);
   return profile;
@@ -144,10 +161,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setCurrentUser(fbUser);
         if (fbUser && firestore) {
           try {
-            const userDocRef = doc(firestore, 'users', fbUser.uid);
-            const userDocSnap = await getDoc(userDocRef);
+            const adminSnap = await getDoc(doc(firestore, 'admins', fbUser.uid));
             if (!isActive || firebaseAuth.currentUser?.uid !== fbUser.uid) return;
-            if (userDocSnap.exists()) {
+            if (adminSnap.exists() && adminSnap.data().role === 'admin') {
+              if (adminSnap.data().status !== 'active') {
+                setUserProfile(null);
+                await signOut(firebaseAuth);
+                return;
+              }
+              setUserProfile({
+                uid: fbUser.uid,
+                email: fbUser.email || '',
+                displayName: adminSnap.data().displayName || fbUser.displayName || 'Administrator',
+                photoURL: fbUser.photoURL || undefined,
+                role: 'admin',
+                status: 'active',
+                createdAt: String(adminSnap.data().createdAt || new Date().toISOString())
+              });
+            } else {
+              const userDocSnap = await getDoc(doc(firestore, 'users', fbUser.uid));
+              if (!isActive || firebaseAuth.currentUser?.uid !== fbUser.uid) return;
+              if (!userDocSnap.exists()) {
+                setUserProfile(null);
+                if (isActive) setLoading(false);
+                return;
+              }
               const profile = userDocSnap.data() as UserProfile;
               if (profile.status === 'suspended') {
                 setUserProfile(null);
@@ -156,7 +194,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               }
               setUserProfile(profile);
             }
-            else setUserProfile((current) => current?.uid === fbUser.uid ? current : null);
           } catch (err) {
             console.error('Error fetching user profile:', err);
           }
@@ -182,7 +219,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           ? '/vendor/dashboard'
           : profile.role === 'admin'
             ? '/admin/dashboard'
-            : '/customer/dashboard';
+            : '/';
         window.location.replace(dashboard);
       }).catch(async (error) => {
         consumePendingGoogleRole();
@@ -325,7 +362,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           displayName,
           role,
           status: 'active',
-          phone,
+          ...(phone ? { phone } : {}),
           termsAccepted: true,
           privacyPolicyAccepted: true,
           termsAcceptedAt: consentTimestamp,
@@ -346,7 +383,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         displayName,
         role,
         status: 'active',
-        phone,
+        ...(phone ? { phone } : {}),
         city: 'Bangalore',
         dietaryPreference: 'all',
         termsAccepted: true,

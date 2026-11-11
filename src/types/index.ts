@@ -12,6 +12,9 @@ export interface UserProfile {
   photoURL?: string;
   city?: string;
   dietaryPreference?: 'all' | 'veg' | 'jain';
+  age?: number;
+  heightCm?: number;
+  weightKg?: number;
   termsAccepted?: boolean;
   privacyPolicyAccepted?: boolean;
   termsAcceptedAt?: string;
@@ -53,7 +56,10 @@ export interface Vendor {
   postalCode?: string;
   location?: VendorLocation;
   isOnline?: boolean;
+  availabilityStatus?: 'online' | 'offline';
   locationAvailable?: boolean;
+  locationUpdatedAt?: string;
+  locationFreshness?: 'fresh' | 'stale';
   gpsAccuracy?: number;
   lastLocationAt?: string;
   lastSeenAt?: string;

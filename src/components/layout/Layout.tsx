@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Outlet } from 'react-router-dom';
+import { Outlet, useLocation } from 'react-router-dom';
 import { Navbar } from './Navbar';
 import { MobileHeader } from './MobileHeader';
 import { MobileMenu } from './MobileMenu';
@@ -9,9 +9,10 @@ import { OfflineIndicator } from '../common/OfflineIndicator';
 
 export const Layout: React.FC = () => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const isLiveMap = useLocation().pathname === '/live-map';
 
   return (
-    <div className="min-h-screen flex flex-col bg-stone-50 dark:bg-stone-950 text-stone-900 dark:text-stone-100 transition-colors">
+    <div className={`${isLiveMap ? 'h-dvh' : 'min-h-screen'} flex flex-col bg-stone-50 dark:bg-stone-950 text-stone-900 dark:text-stone-100 transition-colors`}>
       {/* Mobile Dark Header (Matching Android App) */}
       <MobileHeader onOpenMobileMenu={() => setMobileMenuOpen(true)} />
 
@@ -22,14 +23,12 @@ export const Layout: React.FC = () => {
       <MobileMenu isOpen={mobileMenuOpen} onClose={() => setMobileMenuOpen(false)} />
 
       {/* Main Content Area - padded at bottom on phones and tablets so fixed 5-item bottom nav never overlaps */}
-      <main className="flex-1 flex flex-col pb-28 xl:pb-0">
+      <main className={`flex-1 min-h-0 flex flex-col ${isLiveMap ? 'pb-[calc(4rem+env(safe-area-inset-bottom))] md:pb-[calc(4.5rem+env(safe-area-inset-bottom))] xl:pb-0' : 'pb-28 xl:pb-0'}`}>
         <Outlet />
       </main>
 
       {/* Footer (Visible across Desktop, Tablet, and Mobile above the fixed bottom nav) */}
-      <div className="pb-20 xl:pb-0">
-        <Footer />
-      </div>
+      {!isLiveMap && <div className="pb-20 xl:pb-0"><Footer /></div>}
 
       {/* Mobile & Tablet Fixed 5-Item Bottom Navigation Bar */}
       <BottomNavigation />

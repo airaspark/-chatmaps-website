@@ -23,14 +23,18 @@ const isValidCoordinates = (location?: VendorLocation): location is VendorLocati
   !!location && Number.isFinite(location.lat) && Number.isFinite(location.lng) &&
   location.lat >= -90 && location.lat <= 90 && location.lng >= -180 && location.lng <= 180;
 
-export const isCurrentOnlineVendor = (vendor: Vendor, now = Date.now()): boolean => {
-  const updatedAt = vendor.lastLocationAt ? Date.parse(vendor.lastLocationAt) : NaN;
+export const isCurrentOnlineVendor = (vendor: Vendor): boolean => {
   return vendor.status === 'approved' &&
     vendor.isOnline === true &&
+    (vendor.availabilityStatus === undefined || vendor.availabilityStatus === 'online') &&
     vendor.locationAvailable === true &&
     isValidCoordinates(vendor.location) &&
-    Number.isFinite(vendor.gpsAccuracy) && (vendor.gpsAccuracy as number) <= 100 &&
-    Number.isFinite(updatedAt) && now - updatedAt >= 0 && now - updatedAt <= 120_000;
+    Number.isFinite(vendor.gpsAccuracy) && (vendor.gpsAccuracy as number) <= 100;
+};
+
+export const isVendorLocationFresh = (vendor: Vendor, now = Date.now(), maxAgeMs = 120_000): boolean => {
+  const updatedAt = Date.parse(vendor.locationUpdatedAt || vendor.lastLocationAt || '');
+  return Number.isFinite(updatedAt) && now - updatedAt >= 0 && now - updatedAt <= maxAgeMs;
 };
 
 export const vendorService = {
@@ -43,7 +47,9 @@ export const vendorService = {
       return () => undefined;
     }
     let approved: Vendor[] = [];
-    const publish = () => callback(approved.filter(vendor => isCurrentOnlineVendor(vendor)));
+    const publish = () => callback(approved
+      .filter(isCurrentOnlineVendor)
+      .map(vendor => ({ ...vendor, locationFreshness: isVendorLocationFresh(vendor) ? 'fresh' : 'stale' })));
     const unsubscribeSnapshot = onSnapshot(query(
       collection(firestore, 'vendors'),
       where('status', '==', 'approved'),
@@ -56,10 +62,8 @@ export const vendorService = {
       console.error('Public vendor subscription failed:', error);
       onError?.(error);
     });
-    const expiryTimer = window.setInterval(publish, 15_000);
     return () => {
       unsubscribeSnapshot();
-      window.clearInterval(expiryTimer);
     };
   },
 
@@ -90,6 +94,7 @@ export const vendorService = {
       ...vendorData,
       status: 'pending' as VendorApprovalStatus,
       isOnline: false,
+      availabilityStatus: 'offline' as const,
       locationAvailable: false,
       isOpen: false,
       rating: 0,
@@ -106,6 +111,7 @@ export const vendorService = {
   updateVendorShop: async (vendorId: string, updates: Partial<Vendor>): Promise<void> => {
     const { id: _id, ownerUid: _ownerUid, status: _status, isOnline: _isOnline,
       locationAvailable: _locationAvailable, location: _location, gpsAccuracy: _accuracy,
+      availabilityStatus: _availabilityStatus, locationUpdatedAt: _locationUpdatedAt,
       lastLocationAt: _lastLocationAt, ...permittedUpdates } = updates;
     await updateDoc(doc(requireDb(), 'vendors', vendorId), {
       ...permittedUpdates,
@@ -137,7 +143,9 @@ export const vendorService = {
       gpsAccuracy: Math.round(accuracy),
       locationAvailable: true,
       isOnline: true,
+      availabilityStatus: 'online',
       lastLocationAt: now,
+      locationUpdatedAt: now,
       lastSeenAt: now,
       updatedAt: now
     });
@@ -151,6 +159,7 @@ export const vendorService = {
     const now = new Date().toISOString();
     await updateDoc(vendorRef, {
       isOnline: false,
+      availabilityStatus: 'offline',
       locationAvailable: false,
       lastSeenAt: now,
       updatedAt: now

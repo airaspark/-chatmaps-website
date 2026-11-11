@@ -36,6 +36,12 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
+    // The Calories page already stores one daily summary per signed-in user here.
+    // Keep the existing path private to that user (and verified administrators).
+    match /users/{userId}/calorieData/{dateId} {
+      allow read, create, update, delete: if (isOwner(userId) && hasActiveProfile(userId)) || isAdmin();
+    }
+
     match /vendors/{vendorId} {
       // Public listings are online-only. Freshness and coordinate validation are
       // also applied by the client; all presence writes are validated below.
@@ -46,11 +52,11 @@ service cloud.firestore {
       allow create: if (isActiveVendor() &&
         request.resource.data.ownerUid == request.auth.uid &&
         request.resource.data.status == 'pending' &&
-        request.resource.data.isOnline == false && request.resource.data.locationAvailable == false &&
+        request.resource.data.isOnline == false && request.resource.data.availabilityStatus == 'offline' && request.resource.data.locationAvailable == false &&
         request.resource.data.keys().hasOnly([
-          'ownerUid', 'ownerEmail', 'shopName', 'ownerName', 'phone', 'category', 'address', 'city',
+            'ownerUid', 'ownerEmail', 'shopName', 'ownerName', 'phone', 'category', 'address', 'city',
           'description', 'priceRange', 'openingHours', 'bannerImage', 'coverImageUrl', 'photos', 'menu',
-          'isOpen', 'status', 'isOnline', 'locationAvailable', 'rating', 'reviewCount', 'viewsCount',
+          'isOpen', 'status', 'isOnline', 'availabilityStatus', 'locationAvailable', 'rating', 'reviewCount', 'viewsCount',
           'favoritesCount', 'createdAt', 'updatedAt', 'whatsapp', 'landmark', 'postalCode',
           'isPureVeg', 'subCategories'
         ])) || isAdmin();
@@ -66,16 +72,21 @@ service cloud.firestore {
           ]) ||
           (resource.data.status == 'approved' &&
             request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-              'location', 'gpsAccuracy', 'locationAvailable', 'isOnline', 'lastLocationAt', 'lastSeenAt', 'updatedAt'
+              'location', 'gpsAccuracy', 'locationAvailable', 'isOnline', 'availabilityStatus', 'lastLocationAt', 'locationUpdatedAt', 'lastSeenAt', 'updatedAt'
             ]) && request.resource.data.isOnline == true && request.resource.data.locationAvailable == true &&
+            request.resource.data.availabilityStatus == 'online' &&
+            request.resource.data.locationUpdatedAt is string &&
+            request.resource.data.lastLocationAt is string &&
             request.resource.data.location.lat is number && request.resource.data.location.lng is number &&
             request.resource.data.location.lat >= -90 && request.resource.data.location.lat <= 90 &&
             request.resource.data.location.lng >= -180 && request.resource.data.location.lng <= 180 &&
             request.resource.data.gpsAccuracy is number && request.resource.data.gpsAccuracy >= 0 && request.resource.data.gpsAccuracy <= 100) ||
           (request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'isOnline', 'locationAvailable', 'lastSeenAt', 'updatedAt'
-          ]) && request.resource.data.isOnline == false && request.resource.data.locationAvailable == false)
-        )) || isAdmin();
+            'isOnline', 'availabilityStatus', 'locationAvailable', 'lastSeenAt', 'updatedAt'
+          ]) && request.resource.data.isOnline == false && request.resource.data.availabilityStatus == 'offline' && request.resource.data.locationAvailable == false)
+        )) || (isAdmin() && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'isOnline', 'availabilityStatus', 'locationAvailable'
+        ]));
 
       allow delete: if isAdmin();
     }
