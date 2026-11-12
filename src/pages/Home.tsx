@@ -7,7 +7,7 @@ import { useAuth } from '../context/AuthContext';
 import { useApp } from '../context/AppContext';
 import { CRAVING_CATEGORIES, getVendorCoverImage } from '../data/foodImages';
 import { PWAInstallButton } from '../components/common/PWAInstallButton';
-import { MANUAL_CITY_OPTIONS, normalizeCityName } from '../data/cities';
+import { MANUAL_CITY_OPTIONS, vendorMatchesCity } from '../data/cities';
 import {
   Search,
   MapPin,
@@ -195,9 +195,9 @@ export const Home: React.FC = () => {
 
   const cityVendors = vendors.filter(vendor => {
     if (!cityName) return false;
-    const sameCity = normalizeCityName(vendor.city || '') === normalizeCityName(cityName);
+    const sameCity = vendorMatchesCity(vendor.city, vendor.address, cityName);
     const actualDistance = distanceKm(vendor);
-    return sameCity || (locationSource === 'gps' && actualDistance !== null && actualDistance <= 30);
+    return sameCity || (locationSource === 'gps' && customerCoordinates !== null && actualDistance !== null && actualDistance <= 30);
   });
 
   const filteredVendors = cityVendors.filter((v) => {
@@ -491,7 +491,7 @@ export const Home: React.FC = () => {
                         }`}
                       />
                       <span>{vendor.isOpen ? 'Open Now' : 'Closed'}</span>
-                      {filterNearest && distanceKm(vendor) !== null && <span className="ml-auto text-stone-500">{distanceKm(vendor)!.toFixed(1)} km</span>}
+                      {distanceKm(vendor) !== null && <span className="ml-auto text-stone-500">{distanceKm(vendor)!.toFixed(1)} km</span>}
                     </div>
                   </div>
                 </div>
@@ -500,7 +500,7 @@ export const Home: React.FC = () => {
           </div> : <div className="rounded-2xl border border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900 p-6 text-center">
             <MapPin className="mx-auto mb-2 h-6 w-6 text-orange-500" />
             <p className="text-sm font-bold text-stone-800 dark:text-stone-100">{cityName ? `No online stalls found in ${cityName}` : 'Choose a city to find local stalls'}</p>
-            <p className="mt-1 text-xs text-stone-500">{cityName ? 'Only approved vendors with a fresh live location appear here.' : 'Allow device location or select a city manually from the header.'}</p>
+            <p className="mt-1 text-xs text-stone-500">{cityName ? 'Only approved online vendors with valid device coordinates appear here.' : 'Allow device location or select a city manually from the header.'}</p>
             {locationError && <p className="mt-2 text-xs text-rose-600">{locationError}</p>}
           </div>}
         </div>

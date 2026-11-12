@@ -5,7 +5,7 @@ import { vendorService } from '../services/vendorService';
 import { VendorCard } from '../components/vendor/VendorCard';
 import { FOOD_CATEGORIES } from '../data/initialVendors';
 import { useApp } from '../context/AppContext';
-import { normalizeCityName } from '../data/cities';
+import { vendorMatchesCity } from '../data/cities';
 import {
   Search,
   Filter,
@@ -98,7 +98,7 @@ export const Explore: React.FC = () => {
     return vendors
       .filter((v) => {
         if (cityFilter) {
-          const sameCity = normalizeCityName(v.city || '') === normalizeCityName(cityFilter);
+          const sameCity = vendorMatchesCity(v.city, v.address, cityFilter);
           const nearbyGpsVendor = locationSource === 'gps' && userCoords && v.location && getDistanceKm(v.location.lat, v.location.lng) <= 30;
           if (!sameCity && !nearbyGpsVendor) return false;
         }

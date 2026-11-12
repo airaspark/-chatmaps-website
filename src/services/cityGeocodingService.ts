@@ -8,14 +8,31 @@ export interface CityAddress {
 }
 
 const ERROR_CACHE_TTL_MS = 60 * 1000;
+const SUCCESS_CACHE_TTL_MS = 60 * 60 * 1000;
 const REQUEST_DEBOUNCE_MS = 350;
 const errorCache = new Map<string, { expiresAt: number; error: Error }>();
+const successCache = new Map<string, { expiresAt: number; value: CityAddress }>();
 const inFlightRequests = new Map<string, Promise<CityAddress>>();
 let lastRequestStartedAt = 0;
 let authorizationFailure: { expiresAt: number; error: Error } | null = null;
 let geocodeQueue: Promise<void> = Promise.resolve();
 
-const coordinateKey = ({ lat, lng }: GpsCoordinates): string => `${lat.toFixed(3)},${lng.toFixed(3)}`;
+const coordinateKey = ({ lat, lng }: GpsCoordinates): string => `${lat.toFixed(5)},${lng.toFixed(5)}`;
+
+export const geocoderStatusMessage = (status: string): string => {
+  const descriptions: Record<string, string> = {
+    REQUEST_DENIED: 'Google denied reverse geocoding for this website. Enable Geocoding API for the existing browser key and allow this site’s referrer in its API restrictions. Your GPS coordinates are still available; select your city manually.',
+    ZERO_RESULTS: 'Google returned no address for these coordinates. Your GPS coordinates are still available; select your city manually.',
+    OVER_QUERY_LIMIT: 'Google geocoding quota was reached. Your GPS coordinates are still available; try again later.',
+    UNKNOWN_ERROR: 'Google geocoding had a temporary server error. Your GPS coordinates are still available; try again later.',
+    ERROR: 'The geocoding request failed due to a network or server error. Your GPS coordinates are still available; check your connection and try again.',
+    INVALID_REQUEST: 'Google could not geocode this coordinate request. Your GPS coordinates are still available; select your city manually.'
+  };
+  return descriptions[status] || `Google geocoding failed (${status}). Your GPS coordinates are still available; select your city manually.`;
+};
+
+const networkFailureMessage = (): string =>
+  'Reverse geocoding could not reach Google because of a network error. Your GPS coordinates are still available; check your connection or select your city manually.';
 
 const waitForGeocoderSlot = async (): Promise<void> => {
   const previousRequest = geocodeQueue;
@@ -51,22 +68,20 @@ const performReverseGeocode = async (coordinates: GpsCoordinates): Promise<CityA
       location: { lat: coordinates.lat, lng: coordinates.lng }
     });
   } catch (error) {
-    const detail = error instanceof Error ? error.message : '';
-    if (/REQUEST_DENIED|not allowed|denied/i.test(detail)) {
-      throw new Error('Google denied reverse geocoding for this website. Check that Geocoding API is enabled and allowed for the existing browser API key. Your GPS coordinates are still available; select a city manually.');
+    const detail = `${(error as any)?.code || ''} ${error instanceof Error ? error.message : String(error)}`;
+    const denied = detail.match(/REQUEST_DENIED/i);
+    if (denied || /not allowed|access denied/i.test(detail)) throw new Error(geocoderStatusMessage('REQUEST_DENIED'));
+    const status = detail.match(/ZERO_RESULTS|OVER_QUERY_LIMIT|UNKNOWN_ERROR|INVALID_REQUEST/i)?.[0];
+    if (status) throw new Error(geocoderStatusMessage(status));
+    if (typeof navigator !== 'undefined' && !navigator.onLine || /network|fetch|offline|connection/i.test(detail)) {
+      throw new Error(networkFailureMessage());
     }
-    throw new Error(`Could not identify a city from GPS${detail ? `: ${detail}` : ''}. Your GPS coordinates are still available; select a city manually.`);
+    throw new Error(`Reverse geocoding request failed. ${detail ? `${detail}. ` : ''}Your GPS coordinates are still available; select your city manually.`);
   }
 
   const status = response?.status || 'OK';
-  if (status !== 'OK' && status !== 'ZERO_RESULTS') {
-    const descriptions: Record<string, string> = {
-      REQUEST_DENIED: 'Google denied reverse geocoding for this website. Check that Geocoding API is enabled and allowed for the existing browser API key.',
-      OVER_QUERY_LIMIT: 'Google geocoding quota was reached. Try again later.',
-      UNKNOWN_ERROR: 'Google geocoding had a temporary error. Try again later.'
-    };
-    throw new Error(`${descriptions[status] || `Google geocoding failed (${status}).`} Your GPS coordinates are still available; select a city manually.`);
-  }
+  if (status === 'ZERO_RESULTS') throw new Error(geocoderStatusMessage(status));
+  if (status !== 'OK') throw new Error(geocoderStatusMessage(status));
 
   const result = response.results?.find((item: any) => item.types?.some((type: string) =>
     ['locality', 'postal_town', 'administrative_area_level_2'].includes(type)
@@ -87,6 +102,9 @@ const performReverseGeocode = async (coordinates: GpsCoordinates): Promise<CityA
 /** Reverse-geocode only explicit browser GPS coordinates; successful results remain memory-only. */
 export const reverseGeocodeCity = async (coordinates: GpsCoordinates): Promise<CityAddress> => {
   const key = coordinateKey(coordinates);
+  const cachedSuccess = successCache.get(key);
+  if (cachedSuccess && cachedSuccess.expiresAt > Date.now()) return cachedSuccess.value;
+  if (cachedSuccess) successCache.delete(key);
   if (authorizationFailure && authorizationFailure.expiresAt > Date.now()) throw authorizationFailure.error;
   if (authorizationFailure) authorizationFailure = null;
   const cachedError = errorCache.get(key);
@@ -97,7 +115,10 @@ export const reverseGeocodeCity = async (coordinates: GpsCoordinates): Promise<C
   if (current) return current;
 
   const request = performReverseGeocode(coordinates)
-    .then(value => value)
+    .then(value => {
+      successCache.set(key, { expiresAt: Date.now() + SUCCESS_CACHE_TTL_MS, value });
+      return value;
+    })
     .catch(error => {
       const normalized = error instanceof Error ? error : new Error('Reverse geocoding failed. Select your city manually.');
       errorCache.set(key, { expiresAt: Date.now() + ERROR_CACHE_TTL_MS, error: normalized });

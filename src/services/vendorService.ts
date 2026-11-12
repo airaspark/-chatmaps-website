@@ -12,6 +12,8 @@ import {
   type Unsubscribe
 } from 'firebase/firestore';
 import { Vendor, VendorApprovalStatus, VendorLocation } from '../types';
+import { isCurrentOnlineVendor, isVendorLocationFresh } from './vendorEligibility';
+export { isCurrentOnlineVendor, isVendorLocationFresh } from './vendorEligibility';
 
 const requireDb = () => {
   if (!isFirebaseConfigured() || !db) throw new Error('Vendor records are unavailable because Firebase is not configured.');
@@ -22,20 +24,6 @@ const mapVendor = (id: string, data: Record<string, any>): Vendor => ({ ...data,
 const isValidCoordinates = (location?: VendorLocation): location is VendorLocation =>
   !!location && Number.isFinite(location.lat) && Number.isFinite(location.lng) &&
   location.lat >= -90 && location.lat <= 90 && location.lng >= -180 && location.lng <= 180;
-
-export const isCurrentOnlineVendor = (vendor: Vendor): boolean => {
-  return vendor.status === 'approved' &&
-    vendor.isOnline === true &&
-    (vendor.availabilityStatus === undefined || vendor.availabilityStatus === 'online') &&
-    vendor.locationAvailable === true &&
-    isValidCoordinates(vendor.location) &&
-    Number.isFinite(vendor.gpsAccuracy) && (vendor.gpsAccuracy as number) <= 100;
-};
-
-export const isVendorLocationFresh = (vendor: Vendor, now = Date.now(), maxAgeMs = 120_000): boolean => {
-  const updatedAt = Date.parse(vendor.locationUpdatedAt || vendor.lastLocationAt || '');
-  return Number.isFinite(updatedAt) && now - updatedAt >= 0 && now - updatedAt <= maxAgeMs;
-};
 
 export const vendorService = {
   subscribeToApprovedVendors: (callback: (vendors: Vendor[]) => void, onError?: (error: Error) => void): Unsubscribe => {

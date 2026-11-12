@@ -256,7 +256,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSelectedCity(cleanCity);
     setSelectedState(null);
     setSelectedLocality(null);
-    setCustomerCoordinates(null);
     setLocationSource('manual');
     manualCitySelectedRef.current = true;
     gpsCityAvailableRef.current = false;
@@ -275,7 +274,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSelectedCity('');
     setSelectedState(null);
     setSelectedLocality(null);
-    setCustomerCoordinates(null);
     setLocationSource('unknown');
     manualCitySelectedRef.current = false;
     gpsCityAvailableRef.current = false;
@@ -401,7 +399,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSelectedCity('');
     setSelectedState(null);
     setSelectedLocality(null);
-    setCustomerCoordinates(null);
     try {
       localStorage.removeItem('chatmaps_selected_city');
       localStorage.removeItem('chatmaps_location_source');
