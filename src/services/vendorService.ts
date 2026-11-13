@@ -61,10 +61,17 @@ export const vendorService = {
   },
 
   getVendorById: async (vendorId: string): Promise<Vendor | null> => {
-    const snapshot = await getDoc(doc(requireDb(), 'vendors', vendorId));
-    if (!snapshot.exists()) return null;
-    const vendor = mapVendor(snapshot.id, snapshot.data());
-    return isCurrentOnlineVendor(vendor) ? vendor : null;
+    if (import.meta.env.DEV) {
+      const snapshot = await getDoc(doc(requireDb(), 'vendors', vendorId));
+      if (!snapshot.exists()) return null;
+      const vendor = mapVendor(snapshot.id, snapshot.data());
+      return vendor.status === 'approved' ? vendor : null;
+    }
+
+    const response = await fetch(`/api/public-vendor/${encodeURIComponent(vendorId)}`);
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error('Unable to load this public vendor page. Please try again later.');
+    return await response.json() as Vendor;
   },
 
   getVendorByOwnerUid: async (ownerUid: string): Promise<Vendor | null> => {

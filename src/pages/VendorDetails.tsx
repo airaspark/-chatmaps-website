@@ -5,6 +5,7 @@ import { vendorService } from '../services/vendorService';
 import { reviewService } from '../services/reviewService';
 import { favoriteService } from '../services/favoriteService';
 import { useAuth } from '../context/AuthContext';
+import { applyPageMetadata } from '../seo/pageMetadata';
 import {
   Star,
   MapPin,
@@ -46,6 +47,11 @@ export const VendorDetails: React.FC = () => {
       const v = await vendorService.getVendorById(id);
       if (v) {
         setVendor(v);
+        applyPageMetadata(`/vendor/${encodeURIComponent(v.id)}`, {
+          title: `${v.shopName} | Street Food on ChatMaps`,
+          description: `${v.category} at ${v.shopName}${v.city ? ` in ${v.city}` : ''}. View stall details, opening status, directions, menu, and reviews on ChatMaps.`,
+          indexable: true,
+        });
         const revs = await reviewService.getReviewsByVendorId(id);
         setReviews(revs);
 
@@ -53,6 +59,12 @@ export const VendorDetails: React.FC = () => {
           const fav = await favoriteService.isVendorFavorited(userProfile.uid, id);
           setIsFavorited(fav);
         }
+      } else {
+        applyPageMetadata(`/vendor/${encodeURIComponent(id)}`, {
+          title: 'Street Stall Not Found | ChatMaps',
+          description: 'This stall is not currently available on ChatMaps.',
+          indexable: false,
+        });
       }
       setLoading(false);
     };

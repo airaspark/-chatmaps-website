@@ -36,12 +36,14 @@ import { VendorProfile } from './pages/vendor/VendorProfile';
 // Admin Pages
 import { AdminDashboard } from './pages/admin/AdminDashboard';
 import { RequireAdmin } from './components/auth/RequireAdmin';
+import { RouteMetadata } from './seo/RouteMetadata';
 
 export default function App() {
   return (
     <AuthProvider>
       <AppProvider>
         <BrowserRouter>
+          <RouteMetadata />
           <Routes>
             <Route path="/" element={<Layout />}>
               {/* Public discovery routes */}
@@ -54,7 +56,7 @@ export default function App() {
               <Route path="about" element={<About />} />
               <Route path="contact" element={<Contact />} />
               <Route path="privacy-policy" element={<PrivacyPolicy />} />
-              <Route path="terms" element={<TermsConditions />} />
+              <Route path="terms" element={<Navigate to="/terms-conditions" replace />} />
               <Route path="terms-conditions" element={<TermsConditions />} />
               <Route path="delete-account" element={<AccountDeletion />} />
 
